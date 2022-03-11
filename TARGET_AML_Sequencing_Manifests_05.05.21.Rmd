@@ -1,0 +1,1846 @@
+---
+title: "TARGET_AML_Ribodepletion_Manifest_Updates"
+author: "Jenny Smith"
+date: "September 28, 2020"
+output: html_document
+---
+
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(TARGET,'SequencingDataMatrix/'))
+table = function (..., useNA = 'always') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height=5, fig.width=8)
+options(stringsAsFactors = FALSE)
+
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(gtools)
+
+library(aws.s3)
+library(aws.signature)
+
+library(DeGSEA)
+getwd()
+```
+
+```{r}
+# source(file.path(SCRIPTS, "conversion_scripts/Merge_Cat_FixDupIDs_Function.r"))
+```
+
+
+
+# Read in the Clinical Data
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_05.21.21.csv"))
+
+
+merged <- merged %>%
+  filter(!is.na(USI), !grepl("Unknown", USI))
+
+head(merged[,1:5])
+dim(merged) #2314  150
+```
+
+```{r}
+table(merged$Protocol)
+```
+
+# RNAseq Counts Matrix Manifests
+
+## Aug 2020 Update RBD Manifest 
+
+```{r}
+manifest.RBD <- read.csv(file.path(TARGET,"SequencingDataMatrix/00_archive/TARGET_AML_Ribodepleted_Master_Manifest_2.14.20.csv"), 
+                         na.strings = c("NA","","N/A","Unknown")) %>%
+  mutate(Barcode=gsub("\\.","-", gsub("_replicate","", Sample))) %>%
+  mutate_at(vars(Barcode),~ifelse(grepl("Sorted-CD34--09A",Barcode),
+                                  gsub("Sorted-CD34--09A","Sorted-CD34+-09A", Barcode), Barcode)) %>%
+  mutate_all(~gsub("CD34_NBM", "CD34_PB", .)) %>% #they are peripheral bloods
+  dplyr::select(Sample,Barcode,USI, Protocol, Group:Time_point, Tissue)
+
+
+# head(manifest.RBD)
+dim(manifest.RBD) # 2345    9
+table(manifest.RBD$Group)
+```
+
+```{r}
+manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/00_archive/TARGET_AML_RBD_0531_1031_miRNAseq_mRNAseq_Manifest_v5.csv")) %>%
+
+  #only include the mRNA-seq data sets 
+  filter(!(grepl("PATGIG|PATISD", Final_Patient_ID) & grepl("Replicate",Replicate))) %>%
+  filter(!is.na(mRNAseq_coverage.transcript.normalized)) %>%
+  dplyr::select(everything(), Group=Type)  %>%
+  
+  #Create a column to merge with the RBD master manifest. 
+  mutate(Joining_IDs=case_when(
+    Final_Patient_ID %in% manifest.RBD$Barcode ~ Final_Patient_ID, 
+    PATIENT_ID_Original %in% manifest.RBD$Barcode ~ PATIENT_ID_Original)) %>% 
+  
+  arrange(PATIENT_ID_Original) 
+
+# head(manifest)
+dim(manifest) #1574   18
+```
+
+```{r}
+# Replicates were determined using the manifests in the SequencingDataMatrix/ directory.
+#these are the replicates for ribodepleted RNAseq batch 1 to batch 2
+rep_b12=c("TARGET-20-PAXLDJ-09A-01R",
+         "TARGET-20-PAXGYZ-03A-01R", 
+         "TARGET-20-PAXEBW-09A-01R", 
+         "TARGET-20-PAWTSD-09A-01R",
+         "TARGET-20-PAWMHE-09A-01R",
+         "TARGET-20-PAWKIW-03A-01R",
+         "TARGET-20-PAWEYY-09A-01R",
+         "TARGET-20-PAVWRI-09A-01R",
+         "TARGET-20-PAVTRU-09A-01R",
+         "TARGET-20-PAVHWK-09A-01R",
+         "TARGET-20-PAVBVP-09A-01R",
+         "TARGET-20-PAUVIB-09A-01R",
+         "TARGET-20-PAUUTI-09A-01R",
+         "TARGET-20-PATISD-09A-01R",
+         "TARGET-20-PATGIG-03A-01R",
+         "TARGET-20-PATESX-09A-01R",
+         "TARGET-20-PASRLS-09A-01R",
+         "TARGET-20-PASLTF-09A-01R",
+         "TARGET-20-PASIEJ-09A-01R",
+         "TARGET-20-PARVSF-09A-01R",
+         "TARGET-20-PALHWN-09A-01R",
+         "TARGET-00-BM5776-14A-01R",
+         "TARGET-00-BM5759-14A-01R",
+         "TARGET-00-BM5756-14A-01R",
+         "TARGET-00-BM5751-14A-01R",
+         "TARGET-00-BM5682-14A-01R",
+         "TARGET-00-BM5233-14A-01R",
+         "TARGET-00-BM5136-09A-01R",
+         "TARGET-00-BM5108-09A-01R",
+         "TARGET-00-BM4641-14A-01R",
+         "TARGET-00-BM4616-14A-01R",
+         "TARGET-00-BM4508-14A-01R",
+         "TARGET-00-BM4473-14A-01R",
+         "TARGET-00-BM4404-14A-01R",
+         "TARGET-00-BM4203-14A-01R",
+         "TARGET-00-BM3969-14A-01R",
+         "TARGET-00-BM3897-14A-01R")
+```
+
+```{r}
+#relapse sample replicates 
+#"TARGET-20-PAVNUW-03A-01R" in batch 1/2 RBD sequencing did not work -so we dont have the matched replicate. Making this harder. 
+Reps_relapse <- c("TARGET-20-PAVNUW-03A-01R",
+"TARGET-20-PATGTL-03A-01R",
+"TARGET-20-PASMSZ-03A-01R",
+"TARGET-20-PAXWMS-03A-01R")
+```
+
+
+https://en.wikipedia.org/wiki/ETS_transcription_factor_family#:~:text=In%20the%20field%20of%20molecular,elegans%20and%209%20in%20Drosophila.
+
+```{r}
+manifest.RBD_update <- manifest.RBD %>% 
+  left_join(., dplyr::select(manifest,Final_Patient_ID,
+                      PATIENT_ID_Original,Joining_IDs), 
+            by=c("Barcode"="Joining_IDs")) %>% 
+  group_by(Sample) %>%
+  mutate(N=n(),
+         Keep=case_when(
+    N == 1 ~ TRUE,
+    N == 2 & grepl("R_replicate", Sample) ~ Final_Patient_ID == PATIENT_ID_Original,
+    N == 2 & !grepl("R_replicate", Sample) ~ Final_Patient_ID != PATIENT_ID_Original)) %>%
+  filter(Keep) %>%
+  ungroup() %>% 
+  
+  mutate_at(vars(Final_Patient_ID, PATIENT_ID_Original), ~case_when(
+    is.na(.) ~ Barcode,
+    TRUE ~ .)) %>%
+  add_row(USI="S-1327", Sample="S.1327",
+          Final_Patient_ID="S-1327", PATIENT_ID_Original="S-1327", 
+          Group="AML", Time_point="relapse") %>% 
+  left_join(., dplyr::select(merged, USI, Reg.,Protocol2=Protocol,
+                      Primary.Fusion, Primary.CNV, Additional.Fusions.CNV), 
+            by="USI") %>% 
+  
+  mutate(AML_Subtype=case_when(
+    grepl("CBFA2T3-GLIS2",Primary.Fusion) | grepl("CBFA2T3-GLIS2",Additional.Fusions.CNV) ~ "CBFA2T3-GLIS2", 
+    grepl("NUP98-KDM5A",Primary.Fusion) | grepl("NUP98-KDM5A",Additional.Fusions.CNV) ~ "NUP98-KDM5A",
+    grepl("RBM15-MKL1",Primary.Fusion) | grepl("RBM15-MKL1",Additional.Fusions.CNV) ~ "RBM15-MKL1",
+    grepl("NUP98-NSD1",Primary.Fusion) | grepl("NUP98-NSD1",Additional.Fusions.CNV) ~ "NUP98-NSD1", 
+    grepl("ETV[1-6]|FLI1|ERG|FEV|ELF[1-4]|ETS[1-2]",Primary.Fusion) |
+      grepl("ETV[1-6]|FLI1|ERG|FEV|ELF[1-4]|ETS[1-2]", Additional.Fusions.CNV) ~ "ETS-Fusion", 
+    grepl("CBFB-MYH11",Primary.Fusion) | grepl("CBFB-MYH11",Additional.Fusions.CNV) ~ "CBFB-MYH11", 
+    grepl("RUNX1-RUNX1T1",Primary.Fusion) | grepl("RUNX1-RUNX1T1",Additional.Fusions.CNV) ~ "RUNX1-RUNX1T1", 
+    grepl("KMT2A",Primary.Fusion) | grepl("KMT2A",Additional.Fusions.CNV) ~ "KMT2A", 
+    grepl("DEK-NUP214",Primary.Fusion) | grepl("DEK-NUP214",Additional.Fusions.CNV) ~ "DEK-NUP214",
+    grepl("None",Primary.Fusion)  ~ "No.Primary.Fusion",
+    TRUE ~ Group)) %>%
+  
+  mutate_at(vars(AML_Subtype), ~ifelse(.=="FlowSorted", "AML", .)) %>%
+  mutate_at(vars(Protocol), ~case_when(
+    is.na(.) & !is.na(Protocol2) ~ Protocol2,
+    is.na(.) & is.na(Protocol2) ~ Group,
+    TRUE ~ .)) %>%
+  
+  
+  dplyr::select(Sample,Final_Patient_ID,PATIENT_ID_Original,USI,Reg., 
+         Protocol,AML_Subtype,Group, everything(),
+         -Barcode, -Keep, -N,-Reg.,-Protocol2,
+         Primary.Fusion,Primary.CNV, Additional.Fusions.CNV)
+  
+  
+
+dim(manifest.RBD)
+dim(manifest.RBD_update)
+# write.csv(manifest.RBD_update, file.path(TARGET,"SequencingDataMatrix/TARGET_AML_Ribodepleted_Master_Manifest_8.5.20.csv"))
+
+# rm(manifest.RBD, manifest)
+# table(manifest.RBD_update$Protocol)
+```
+
+```{r}
+table(manifest.RBD_update$Protocol, useNA='ifany')
+table(manifest.RBD_update$Group, useNA='ifany')
+# table(manifest.RBD_update$AML_Subtype,useNA='ifany')
+```
+
+
+## Sept 2020/Feb 2021/April 2021 RBD Remission RNAseq Batch 
+
+Add in relapse, JMML, APL, and MDAnderson datasets 
+Add in more detail on the cell lines
+UPDATE flowsorted - unsorted fractions into diagnostic time-points to be included in DE etc. 
+
+```{r}
+manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/00_archive/TARGET_AML_Ribodepleted_Master_Manifest_8.5.20.csv"),
+                     row.names = 1) %>% 
+  mutate(Lib_Prep="RBD") 
+
+
+head(manifest[,1:5])
+dim(manifest) #2346   15
+
+# table(manifest$Tissue)
+table(manifest$Group)
+```
+
+```{r}
+# dir(file.path(TARGET,"SequencingDataMatrix/"))
+# remission <- read.csv(file.path(file.path(TARGET,"SequencingDataMatrix/00_archive/TARGET_AML_1031_Remission_Ribodepleted_RNAseq_Manifest_9.1.20.csv"))) 
+# remission <- read.csv(file.path(TARGET,"SequencingDataMatrix/00_archive/TARGET_AML_Remission_JMML_APL_MDA_CordBlood_RNAseq_Manifest_02.03.21.csv")) %>% 
+  
+remission <- read.csv(file.path(PROJHOME,'2020.09.01_Concatenate_Remission_RNAseq/TARGET_AML_Remission_JMML_APL_MDA_CordBlood_RNAseq_Manifest_06.08.21.csv')) %>% 
+  dplyr::select(everything(), 
+                Library=LIBRARY, 
+         Tissue=Anatomic.Site) %>% 
+  mutate_at(vars(Sample), ~gsub("-", "\\.", .)) %>% 
+  mutate(Group=case_when(
+                  grepl("TARGET-20-AMKL4", Final_Patient_ID) ~ "FLAGGED (unsure)",
+                  grepl("cell_line", Anonymous.Patient.ID) | grepl("MOLM14CBFGLIS",Sample) ~ "CellLine",
+                  
+                  # grepl("TARGET-20-2151",Final_Patient_ID) ~ "Adult AML (Stirewalt)", #Notes say they are adult AML??
+                  grepl("TARGET-20-2151",Final_Patient_ID) ~ "Normal_PB",
+                  grepl("PCA[0-9]+",Sample) & grepl("APL", Plate.ID) ~ "Normal_PB",
+                  grepl("APL", Plate.ID)  ~ "APL", 
+                  grepl("JMML", Plate.ID) ~ "JMML",
+                  grepl("MDA-CL", Plate.ID) | grepl("TARGET.20.[0-9]{7}", Sample) ~ "Adult AML (MDA)", 
+                  grepl("Cordbloods", Plate.ID) ~ "Cordblood",
+                  TRUE ~ "AML"),
+        Time_point=case_when(
+              grepl("AML|APL|JMML", Group) &  grepl("03A|09A", Sample) ~ "diagnostic",
+              grepl("AML|APL|JMML", Group) &  grepl("40A|04A", Sample) ~ "relapse",
+              grepl("AML|APL|JMML", Group) & grepl("10A|14A", Sample) ~ "remission",
+              grepl("AML|APL|JMML", Group) & grepl("41A|42A", Sample) ~ "refractory",
+              TRUE ~ Group),
+        Lib_Prep="RBD") %>% 
+  mutate_at(vars(Tissue), ~case_when(
+    .== "Blood" ~ "peripheral_blood",
+    grepl("[Bb]one [Mm]arrow", .) ~ "bone_marrow",
+    .=="Cord Blood" ~ "cord_blood",
+    .=="Unknown" & Group=="CellLine" ~ "CellLine",
+    TRUE ~ .)) %>% 
+  mutate_at(vars(USI), ~case_when(
+    grepl("TARGET-20-2151", .) & grepl("\\-", .) ~ str_split_fixed(., pattern = "-", n=5)[,3],
+    grepl("APL", Plate.ID) & grepl("\\-", .) ~ str_split_fixed(., pattern = "-", n=5)[,3],
+    Group=="Cordblood"  ~ gsub("TARGET.20.(CB.+|D[0-9]{1,2}.+|CD.+|EC.+)\\.00.01R", "\\1", Sample),
+    # Group=="CellLine" ~ str_split_fixed(., pattern = "-", n=5)[,3],
+    # Group=="JMML" ~ str_split_fixed(., pattern = "-", n=5)[,3],
+    # Group=="Adult AML (MDA)" ~ str_split_fixed(., pattern = "-", n=5)[,3],
+    TRUE ~ .)) %>% 
+  
+  
+  left_join(., dplyr::select(merged, USI,Protocol,
+                      Primary.Fusion, Primary.CNV, Additional.Fusions.CNV), 
+            by="USI") %>% 
+  mutate_at(vars(Protocol), ~ifelse(is.na(.), Group, .)) %>% 
+  mutate(AML_Subtype=case_when(
+    # grepl("TARGET-20-2151",Final_Patient_ID) ~ "Adult Monosomy7",
+    # grepl("TARGET-20-2151", Primary.CNV) ~ "Monosomy7",
+    grepl("CBFA2T3-GLIS2",Primary.Fusion) | grepl("CBFA2T3-GLIS2",Additional.Fusions.CNV) ~ "CBFA2T3-GLIS2", 
+    grepl("NUP98-KDM5A",Primary.Fusion) | grepl("NUP98-KDM5A",Additional.Fusions.CNV) ~ "NUP98-KDM5A",
+    grepl("RBM15-MKL1",Primary.Fusion) | grepl("RBM15-MKL1",Additional.Fusions.CNV) ~ "RBM15-MKL1",
+    grepl("NUP98-NSD1",Primary.Fusion) | grepl("NUP98-NSD1",Additional.Fusions.CNV) ~ "NUP98-NSD1", 
+    grepl("ETV[1-6]|FLI1|ERG|FEV|ELF[1-4]|ETS[1-2]",Primary.Fusion) |
+      grepl("ETV[1-6]|FLI1|ERG|FEV|ELF[1-4]|ETS[1-2]", Additional.Fusions.CNV) ~ "ETS-Fusion", 
+    grepl("CBFB-MYH11",Primary.Fusion) | grepl("CBFB-MYH11",Additional.Fusions.CNV) ~ "CBFB-MYH11", 
+    grepl("RUNX1-RUNX1T1",Primary.Fusion) | grepl("RUNX1-RUNX1T1",Additional.Fusions.CNV) ~ "RUNX1-RUNX1T1", 
+    grepl("KMT2A",Primary.Fusion) | grepl("KMT2A",Additional.Fusions.CNV) ~ "KMT2A", 
+    grepl("DEK-NUP214",Primary.Fusion) | grepl("DEK-NUP214",Additional.Fusions.CNV) ~ "DEK-NUP214",
+    grepl("None",Primary.Fusion)  ~ "No.Primary.Fusion",
+    TRUE ~ Group)) %>% 
+  
+  #The 01R became O1R (the letter) and its causing issues with filenames
+  mutate_at(vars(Sample, Final_Patient_ID), ~gsub("O1R", "01R", .)) %>% 
+  
+  #Re-order columns and remove exra columns 
+  dplyr::select(Sample,
+                contains("Patient"),
+                everything(),
+                # -Notes,
+                -Anonymous.Patient.ID,
+                -Original.Source.Name,
+                -Plate.ID,
+                -Original_Sample.ID_fromFTP
+                # -c(Tissue.Disease.Status:Updated.TARGET.Barcode.w..Timepoint)
+                )
+
+
+
+# head(remission)
+dim(remission)  #708 15
+```
+
+So we have 708 counts/fusion files but only 677 BAM files - so we are missing 31 BAMs by my count
+
+```{r}
+any(remission$Sample %in% manifest$Sample) #FALSE
+any(duplicated(remission$Sample)) #FALSE
+table(remission$Group)
+# table(remission$Tissue, useNA = 'ifany')
+# table(remission$Time_point)
+# table(remission$Protocol)
+
+# filter(remission, Group=="Normal_PB")
+# filter(remission, Group=="APL")
+# filter(remission, Group=="Cordblood")
+```
+
+```{r}
+setdiff(colnames(manifest), colnames(remission))
+setdiff(colnames(remission),colnames(manifest))
+```
+
+```{r}
+cell_line_types <- openxlsx::read.xlsx(file.path(TARGET,"Clinical/metadata/Cell_lines_sequenced_110420.xlsx"), sheet = 1)
+
+# cell_line_types %>%
+#   select(Cell.Line.Name,Cancer.Type, Molecular.Phenotype)
+```
+
+```{r}
+manifest_update <- manifest %>% 
+  bind_rows(., remission) %>% 
+  arrange(Sample, Batch) %>% 
+  
+  mutate_at(vars(Primary.Fusion), ~case_when(
+    grepl("Kasumi", Sample) ~ "RUNX1-RUNX1T1",
+    grepl("ME1", Sample) ~ "CBFB-MYH11",
+    grepl("MV4", Sample) ~ "KMT2A-AFF1",
+    grepl("NOMO", Sample) ~ "KMT2A-MLLT3",
+    grepl("K562", Sample) ~ "BCR-ABL1",
+    grepl("M[O0]7[Ee]", Sample) ~ "CBFA2T3-GLIS2",
+    grepl("WSUAML", Sample) ~ "CBFA2T3-GLIS2",
+    grepl("THP1", Sample) ~ "KMT2A-MLLT3",
+    grepl("HL60", Sample) ~ "MYC (amplified)",
+    grepl("OCIAML2", Sample) ~ "MECOM, DNMT3A R635W",
+    grepl("REH", Sample) ~ "	ETV6-RUNX1",
+    TRUE ~ .)) %>% 
+  
+    mutate_at(vars(AML_Subtype), ~ifelse(.=="AML", "AML, NOS",.)) %>% 
+    mutate_at(vars(Primary.Fusion:Primary.CNV), 
+            ~ifelse(is.na(.), Group, .)) %>% 
+    
+    #Fix the flow-sorted diagnostic samples to be included as diagnostic
+    mutate_at(vars(Time_point), ~case_when(
+                                      Group=="FlowSorted" & grepl("Unsorted.0[39]A",Sample) ~ "diagnostic",
+                                      TRUE ~ .)) %>% 
+    #remove replicate designation for these two samples. They are 2 BAM files, but only single counts files/fusion files 
+    mutate_at(vars(Sample), ~case_when(
+                                      grepl("PATGIG|PATISD", .) ~ gsub("_replicate", "", .),
+                                      TRUE ~ .))
+
+
+head(manifest_update)
+dim(manifest_update) #3054   15
+# any(duplicated(manifest_update$Sample)) #FALSE
+
+
+# write.csv(manifest_update, file.path(TARGET,"SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_07.14.21.csv"),row.names = FALSE)
+```
+
+```{r}
+# manifest_update %>% 
+#   filter(grepl("PATGIG|PATISD", Sample))
+```
+
+```{r}
+table(manifest_update$Protocol, useNA = 'ifany')
+table(manifest_update$Group, useNA = 'ifany')
+table(manifest_update$AML_Subtype, useNA = 'ifany')
+# getwd()
+```
+
+## August  2021
+
+```{r}
+manifest <- read.csv("00_archive/TARGET_AML_Ribodepleted_Manifest_07.14.21.csv")
+
+
+head(manifest)
+# dim(manifest) #3054   15
+```
+
+So we have 708 counts/fusion files but only 677 BAM files - so we are missing 31 BAMs by my count at least from SOW_GSC-1832_Data_Download_Tracking_Sheet_asOf_04.30.2021.xlsx
+
+```{r}
+sow1832 <- openxlsx::read.xlsx(file.path(TARGET,"RNA/mRNAseq/metadata/RNAseq_Submission_Manifests_SOWs/SOW_GSC-1832/Tracking_Sheet/SOW_GSC-1832_Data_Download_Tracking_Sheet_asOf_08.17.2021.xlsx")) 
+
+sow1832_NAs <- sow1832 %>% 
+  filter(is.na(LIBRARY))
+  
+  
+sow1832 <- sow1832 %>% 
+  filter(!is.na(LIBRARY))
+
+
+table(is.na(sow1832$LIBRARY)) #48 NAs
+```
+
+```{r}
+manifest_update <- manifest %>% 
+    #Denote those with the longer reads available for use in the future
+  mutate(Read_Length_75bp="Yes",
+         Read_Length_150bp_on_SWIFT=case_when(
+           Library %in% sow1832$LIBRARY ~ "Yes", #Most accurate but there are 48 missing library IDs from the 
+           grepl("rem", Batch) ~ "Yes", #The "remission batch" SOW 1832 all had 150bp reads and 75bp trimmed reads. 
+           TRUE ~ "No")) %>% 
+  
+  #Re-sync the manifest Primary.Fusion data with the current CDEs
+  select(-matches("Primary.Fusion|Additional.Fusions.CNV|Primary.CNV")) %>% 
+  left_join(., dplyr::select(merged, USI, ETS_Fusion, Primary.Fusion, Primary.CNV, Additional.Fusions.CNV), 
+            by="USI") %>% 
+  
+  #Update the AML_Subtype classification
+  mutate(AML_Subtype=case_when(
+    grepl("CBFA2T3-GLIS2",Primary.Fusion) | grepl("CBFA2T3-GLIS2",Additional.Fusions.CNV) ~ "CBFA2T3-GLIS2",
+    grepl("NUP98-KDM5A",Primary.Fusion) | grepl("NUP98-KDM5A",Additional.Fusions.CNV) ~ "NUP98-KDM5A",
+    grepl("RBM15-MKL1",Primary.Fusion) | grepl("RBM15-MKL1",Additional.Fusions.CNV) ~ "RBM15-MKL1",
+    grepl("NUP98-NSD1",Primary.Fusion) | grepl("NUP98-NSD1",Additional.Fusions.CNV) ~ "NUP98-NSD1",
+    grepl("KMT2A",Primary.Fusion) | grepl("KMT2A",Additional.Fusions.CNV) ~ "KMT2A",
+    grepl("ETV6|ETS|FUS", ETS_Fusion)  ~ "ETS-Fusion", 
+    # grepl("ETV[1-6]|FLI1|ERG|FEV|ELF[1-4]|ETS[1-2]",Primary.Fusion) |
+    #   grepl("ETV[1-6]|FLI1|ERG|FEV|ELF[1-4]|ETS[1-2]", Additional.Fusions.CNV) ~ "ETS-Fusion",
+    grepl("CBFB-MYH11",Primary.Fusion) | grepl("CBFB-MYH11",Additional.Fusions.CNV) ~ "CBFB-MYH11",
+    grepl("RUNX1-RUNX1T1",Primary.Fusion) | grepl("RUNX1-RUNX1T1",Additional.Fusions.CNV) ~ "RUNX1-RUNX1T1",
+    grepl("DEK-NUP214",Primary.Fusion) | grepl("DEK-NUP214",Additional.Fusions.CNV) ~ "DEK-NUP214",
+    grepl("None|none",Primary.Fusion)  ~ "No.Primary.Fusion",
+    TRUE ~ Group)) %>%
+  mutate_at(vars(AML_Subtype), ~gsub("^AML$", "AML, NOS", .)) %>% 
+  
+  mutate_at(vars(Lib_Prep:Primary.Fusion,Primary.CNV), ~ifelse(is.na(.), "Unknown", .)) %>% 
+  select(Sample:USI, Library,everything()) %>% 
+  distinct()
+
+
+dim(manifest_update)
+# write.csv(manifest_update, "TARGET_AML_Ribodepleted_Manifest_08.12.21.csv", row.names = FALSE)
+```
+
+```{r}
+table(manifest_update$AML_Subtype)
+
+
+# manifest_update %>% 
+#   filter(grepl("PAXARD|PAXGIX", Sample)) %>% 
+#   select(Sample, AML_Subtype, Primary.Fusion, Additional.Fusions.CNV, ETS_Fusion, Batch) %>% 
+#   write.csv(., "~/check_PAXARD_PAXGIX_AMLsubtype_status.csv", row.names = FALSE)
+
+# 
+# manifest_update %>%
+#   filter(grepl("MLLT10", Primary.Fusion), !grepl("KMT2A-MLLT10|MLLT10-KMT2A", Primary.Fusion)) %>%
+#    select(Sample, AML_Subtype, Primary.Fusion, Additional.Fusions.CNV, ETS_Fusion, Batch) %>%
+#   write.csv(.,"~/checkL_MLLT10_only_Fusions.csv", row.names = FALSE)
+
+```
+
+```{r}
+table(manifest_update$Read_Length_75bp)
+table(manifest_update$Read_Length_150bp_on_SWIFT,
+      manifest_update$Batch)
+```
+
+
+
+
+## BAMs
+
+### polyA BAMs
+
+```{r}
+polyA.bam.manifest <- SCRATCH_bam_paths %>% 
+  filter(grepl("2016Apr", filepath), grepl(".srt.bam", filepath)) %>% 
+  mutate(filename=gsub("^.+data/([A-Za-z].+bam$)", "\\1",filepath),
+         Patient_ID=str_split_fixed(filename, pattern = "_", n=2)[,1],
+         Lib_Prep="polyA",
+         Group=case_when(
+           grepl("BM[0-9].+IX[0-9]", filename) ~ "HD_NBM",
+           grepl("BM[0-9]", Patient_ID) ~ "NBM",
+           grepl("P[A-Z]", Patient_ID) ~ "AML",
+           ),
+         Batch=ifelse(Group=="HD_NBM","HD_NBM","2016Apr"),
+         Time_point=case_when(
+           Group == "AML" & grepl("09A|03A", Patient_ID) ~  "diagnostic",
+           Group == "AML" & grepl("04A|40A", Patient_ID) ~ "relapse",
+           grepl("NBM", Group) ~ Group,
+         ),
+         Tissue=case_when(
+           Group == "AML" & grepl("03A", Patient_ID) ~  "peripheral_blood",
+           Group == "AML" & grepl("09A", Patient_ID) ~  "bone_marrow",
+         TRUE ~ Group)) %>%
+  mutate(USI=str_split_fixed(Patient_ID, "-", n=5)[,3],
+         Sample=gsub("-",".",Patient_ID) %>% gsub("\\+",".",.),
+         Final_Patient_ID=Patient_ID,
+         PATIENT_ID_Original=Patient_ID) %>%
+  left_join(., dplyr::select(merged, USI, Reg.,Protocol,ETS_Fusion,
+                      Primary.Fusion, Primary.CNV, Additional.Fusions.CNV), 
+            by="USI") %>% 
+  
+  #need unique sample IDs 
+  mutate_at(vars(Sample), 
+            ~ifelse(grepl("HD_NBM",Batch), paste0(., "_replicate"), . )) %>% 
+  
+  mutate(AML_Subtype=case_when(
+    grepl("CBFA2T3-GLIS2",Primary.Fusion) | grepl("CBFA2T3-GLIS2",Additional.Fusions.CNV) ~ "CBFA2T3-GLIS2", 
+    grepl("NUP98-KDM5A",Primary.Fusion) | grepl("NUP98-KDM5A",Additional.Fusions.CNV) ~ "NUP98-KDM5A",
+    grepl("RBM15-MKL1",Primary.Fusion) | grepl("RBM15-MKL1",Additional.Fusions.CNV) ~ "RBM15-MKL1",
+    grepl("NUP98-NSD1",Primary.Fusion) | grepl("NUP98-NSD1",Additional.Fusions.CNV) ~ "NUP98-NSD1", 
+    grepl("ETV6|ETS|FUS", ETS_Fusion)  ~ "ETS-Fusion", 
+    grepl("CBFB-MYH11",Primary.Fusion) | grepl("CBFB-MYH11",Additional.Fusions.CNV) ~ "CBFB-MYH11", 
+    grepl("RUNX1-RUNX1T1",Primary.Fusion) | grepl("RUNX1-RUNX1T1",Additional.Fusions.CNV) ~ "RUNX1-RUNX1T1", 
+    grepl("KMT2A",Primary.Fusion) | grepl("KMT2A",Additional.Fusions.CNV) ~ "KMT2A", 
+    grepl("DEK-NUP214",Primary.Fusion) | grepl("DEK-NUP214",Additional.Fusions.CNV) ~ "DEK-NUP214",
+    grepl("monosomy7",Primary.Fusion) | grepl("monosomy7",Additional.Fusions.CNV) ~ "monosomy7",
+    grepl("del5q",Primary.Fusion) | grepl("del5q",Additional.Fusions.CNV) ~ "del5q",
+    grepl("None",Primary.Fusion)  ~ "No.Primary.Fusion",
+    TRUE ~ Group)) %>%
+  
+  mutate_at(vars(Protocol), ~case_when(
+    is.na(.) & grepl("NBM", Group) ~ Group,
+    is.na(.) & Group == "AML" ~ "Unknown",
+    TRUE ~ .)) %>%
+  dplyr::select(Sample,Patient_ID,USI:Additional.Fusions.CNV,
+         Lib_Prep,Batch:AML_Subtype, everything(), -ETS_Fusion) %>%
+  arrange(Sample) 
+
+
+
+head(polyA.bam.manifest)
+# tail(polyA.bam.manifest)
+dim(polyA.bam.manifest) #508 samples 
+any(duplicated(polyA.bam.manifest$Sample)) 
+any(duplicated(polyA.bam.manifest$filename))
+
+
+# sapply(dplyr::select(polyA.bam.manifest,Protocol,Lib_Prep,Batch:AML_Subtype), table, useNA='ifany')
+
+# write.csv(dplyr::select(polyA.bam.manifest, -filepath),
+#           file.path(TARGET,"SequencingDataMatrix/TARGET_AML_polyA_RNAseq_Manifest_10.02.20.csv"),
+#           row.names = FALSE)
+# write.csv(polyA.bam.manifest,file.path(PROJHOME,"2020.09.15_RNAseq_Fusion_Breakpoints/TARGET_AML_polyA_RNAseq_Bam_Manifest_10.02.20.csv"))
+```
+
+### RBD BAMs
+
+```{r}
+rbd.bam.manifest <- SCRATCH_bam_paths %>%
+  filter(grepl("2017July_BCCA|2019Feb_BCCA|2019Jul_BCCA", filepath)) %>% 
+  mutate(filename=gsub("^.+[dD]ata/([A-Za-z].+bam$)", "\\1",filepath),
+         Final_Patient_ID=str_split_fixed(filename, pattern = "_", n=6)[,1]) %>%
+  mutate_at(vars(Final_Patient_ID), ~case_when(
+    grepl("S-1327", .) ~ "S-1327",
+    TRUE ~ .)) %>% 
+  mutate(Sample=gsub("-",".",Final_Patient_ID) %>% gsub("\\+",".",.)) %>%
+  mutate_at(vars(Sample), ~case_when(
+    grepl("_replicate", filename) ~ paste0(.,"_replicate"), #dx1 batch relicates
+    grepl("2019Feb_BCCA_1031", filepath) & 
+      grepl("PAXWMS.03A|PASMSZ.03A|PATGTL.03A", filename) ~ paste0(.,"_replicate"), #relapse batch replicates
+    grepl("TARGET.20.PALHWN.09A.01R", .) ~ paste0(.,"_replicate"), #inter plate replicates PATGIG.03A|PATISD.09A
+    grepl("TARGET.20.S.1327", .) ~ "S.1327", #stella
+    TRUE ~ .)) %>%
+  mutate(Lib_Prep=str_split_fixed(filename, pattern = "_", n=6)[,2]) %>%
+  mutate_at(vars(Lib_Prep),~ifelse(. != "RBS",str_split_fixed(filename, pattern = "_", n=6)[,3], .))  %>% 
+  left_join(., dplyr::select(manifest,-Final_Patient_ID), by="Sample") %>%
+  group_by(Final_Patient_ID) %>% 
+  mutate_all(~case_when(
+    grepl("PATGIG|PATISD", Sample) ~ ifelse(is.na(.), .[!is.na(.)], unique(.)),
+    TRUE ~ .)) %>% 
+  ungroup() %>%
+  dplyr::select(Sample,Final_Patient_ID, PATIENT_ID_Original:Reg., Lib_Prep, 
+         Protocol:Additional.Fusions.CNV, filename,  -filepath, everything(),filepath,-X) 
+  
+
+dim(rbd.bam.manifest) #2347    5
+head(rbd.bam.manifest)
+
+# table(rbd.bam.manifest$Sample %in% manifest$Sample)
+# table(duplicated(rbd.bam.manifest$Sample))
+# rbd.bam.manifest$Sample[!rbd.bam.manifest$Sample %in% manifest$Sample] #PATGIG,PATISD samples were interbatch duplicates, but BCCA combined them during gene expression and transabyss analyses. But they have two BAM files
+# manifest$Sample[!manifest$Sample %in% rbd.bam.manifest$Sample] # "TARGET.20.PAWZVT.09A.01R" never recieved a BAM file.
+
+
+# write.csv(rbd.bam.manifest,
+#           file.path(PROJHOME,"2020.09.15_RNAseq_Fusion_Breakpoints/TARGET_AML_Ribodepleted_RNAseq_Bam_Manifest_10.02.20.csv"))
+
+# rbd.bam.manifest <- read.csv(file.path(PROJHOME,"2020.09.15_RNAseq_Fusion_Breakpoints/TARGET_AML_Ribodepleted_RNAseq_Bam_Manifest_10.02.20.csv"))
+```
+
+
+
+### BASH code
+
+```{bash }
+SCRATCH="/fh/scratch/delete90/meshinchi_s/jlsmith3/Sbatch_AWS_Reorg/2016Apr"
+BUCKET="fh-pi-meshinchi-s-eco-public"
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/BAM"
+
+ls "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level1/bam/2016Apr_BCCA_0531_PolyAEnriched_Illumina_data/*.ba*" > bams_2016.txt
+ls "/fh/fast/symlink/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level1/bam/2016Apr_BCCA_0531_NormalMarrows_HighDepthSeq_Illumina_data/*ba*" > bams_sym2016A.txt
+ls "/fh/fast/symlink/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level1/bam/2016Apr_BCCA_0531_Illumina_data/*ba*" > bams_sym2016B.txt
+
+
+cat bams*.txt | grep -E ".srt.bam$|.bai$" > sorted_bams.txt 
+cat bams*.txt | grep -E -v ".srt.bam$|.bai$" > unsorted_bams.txt 
+
+sbatch ~/scripts/sbatch_jobs/Upload_and_MD5Check_S3.sh sorted_bams.txt $PREFIX
+```
+
+
+```{bash}
+SCRATCH="/fh/scratch/delete90/meshinchi_s/jlsmith3/Sbatch_AWS_Reorg/2017July"
+BUCKET="fh-pi-meshinchi-s-eco-public"
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/BAM"
+
+
+ls -1 "/fh/fast/symlink/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level1/bam/2017July_BCCA_0531_1031_Ribodepletion_Illumina_data/*.ba*" > bams_2017.txt 
+
+sbatch ~/scripts/sbatch_jobs/Upload_and_MD5Check_S3.sh bams_2017.txt  $PREFIX
+```
+
+```{bash}
+SCRATCH="/fh/scratch/delete90/meshinchi_s/jlsmith3/Sbatch_AWS_Reorg/2019July"
+BUCKET="fh-pi-meshinchi-s-eco-public"
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/BAM"
+
+ls -1 "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level1/bam/2019Jul_BCCA_1531_08B1_DSAML_Ribodepletion_Illumina_Data" > bams_2019july.txt
+
+sbatch ~/scripts/sbatch_jobs/Upload_and_MD5Check_S3.sh bams_2019July.txt $PREFIX
+```
+
+```{bash}
+#Data from 2019Feb_BCCA_1031_Relapse_Ribodepleted_Illumina_data was put on the old S3 bucket before the data migration to new buckets was announced. 
+
+#PAVNUW was a batch replicate, but one of the sequencing runs failed. 
+
+replicates="TARGET-20-PATGTL-03A-01R|TARGET-20-PASMSZ-03A-01R|TARGET-20-PAXWMS-03A-01R"
+BUCKET_New="s3://fh-pi-meshinchi-s-eco-public/TARGET_AML/RNAseq_Illumina_Data/BAM/"
+BUCKET_Old="s3://fh-pi-meshinchi-s/SR/TARGET_AML/RNAseq_Illumina_Data/BAM/" 
+
+files=$(aws s3 ls "$BUCKET_Old" | grep -E "$replicates" | tr -s " " | cut -f 4 -d " " ) 
+for f in $(echo "$files") ; do   aws s3 mv "${BUCKET_Old}$f" "${BUCKET_Old}${f/_RBS/_replicate_RBS}"; done
+
+
+aws s3 cp --recursive --only-show-errors "$BUCKET_Old" "$BUCKET_New"
+
+
+```
+
+### Updates
+
+
+*NOTE we are missing a bunch of files from the RNAseq counts/TransAbyss :/
+
+
+Track down samples for which we have BAMs but DO NOT have counts/fusions from BCCA:
+* "TARGET.20.CB34pos.Dayminus1.00.01R" 
+* "TARGET.20.D7.EC.mock2.00.01R"       
+* "TARGET.20.D7.EC.GFP1.00.01R" 
+* "TARGET.20.PAVAVV.EOI2.14A.01R" 
+* "TARGET.20.PAWCAW.EOI2.14A.01R"
+
+##### July 2021
+
+```{r}
+RBD.RNAseq.manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_07.14.21.csv"))
+
+head(RBD.RNAseq.manifest)
+```
+
+```{r}
+creds <- aws.signature::use_credentials(profile = "default")
+Sys.setenv("AWS_ACCESS_KEY_ID" = creds$default$AWS_ACCESS_KEY_ID,
+           "AWS_SECRET_ACCESS_KEY" = creds$default$AWS_SECRET_ACCESS_KEY,
+           "AWS_DEFAULT_REGION"="us-west-2")
+
+
+blist <- bucketlist()
+blist
+
+BUCKET="fh-pi-meshinchi-s-eco-public"
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/BAM"
+
+S3.BAMs <- get_bucket_df(bucket = BUCKET, prefix = PREFIX,
+                      max = Inf)
+
+# head(S3.BAMs) #9319    8
+# dim(S3.BAMs)
+```
+
+```{r}
+S3.BAMs.df <- S3.BAMs %>% 
+  filter(grepl(".bam$", Key)) %>% 
+  mutate(filename=str_split_fixed(Key, pattern="/", n=4)[,4]) %>% 
+  select(filename, everything())
+
+
+head(S3.BAMs.df, n=20)
+dim(S3.BAMs.df) #3532   11
+```
+
+```{r}
+BAM.RBD.manifest <- read.csv("BAM_manifests/TARGET_AML_Ribodepleted_RNAseq_Bam_Manifest_10.02.20.csv", row.names = 1) %>% 
+  mutate_at(vars(filename), ~case_when(
+     grepl("PASMSZ|PATGTL|PAXWMS", .) & !grepl("40A|04A", .) & Batch == "rlps1" ~ gsub("01R_RBS","01R_replicate_RBS", .),
+     TRUE ~ .)) %>% 
+  select(-filepath)
+
+
+head(BAM.RBD.manifest)
+# any(duplicated(BAM.RBD.manifest$Sample)) #OK
+# table(BAM.RBD.manifest$filename %in% S3.BAMs.df$filename) #OK
+```
+
+```{r}
+BAM.polyA.manifest <- read.csv("BAM_manifests/TARGET_AML_polyA_RNAseq_Bam_Manifest_10.02.20.csv") %>% 
+  select(-Patient_ID)
+
+head(BAM.polyA.manifest)
+# any(duplicated(BAM.polyA.manifest$Sample)) #OK
+# table(BAM.polyA.manifest$filename %in% S3.BAMs.df$filename) #OK
+# table(BAM.polyA.manifest$Sample %in% BAM.RBD.manifest$Sample) #158 duplicate samples
+
+# table(BAM.polyA.manifest$filename %in% BAM.RBD.manifest$filename) #OK
+```
+
+```{r}
+BAM.manifest <- BAM.RBD.manifest %>% 
+  bind_rows(BAM.polyA.manifest)
+
+dim(BAM.manifest) #2855   17
+# head(BAM.manifest)
+
+# table(BAM.manifest$Lib_Prep)
+```
+
+```{r}
+BAM.manifest.cleaned <- S3.BAMs.df %>% 
+  inner_join(., BAM.manifest, by="filename") %>% 
+  select(Sample:Primary.CNV, everything())
+
+
+dim(BAM.manifest.cleaned) #2855   27
+# head(BAM.manifest.cleaned)
+```
+
+```{r}
+S3.BAMs.RBD.new <- S3.BAMs.df %>% 
+  filter(!filename %in% BAM.manifest$filename) %>% 
+  # filter(grepl("ML1|OCI|REH|TF1|WSU", filename)) #I had processed the cell lines earlier and now there are duplicates on the S3 BAMs. Deleted now. 
+  
+  #Create identifier columns 
+  mutate(Final_Patient_ID=gsub("(^.+R)_(RBS|replicate).+", "\\1", filename),
+         Sample=gsub("-", "\\.", Final_Patient_ID)) %>% 
+  
+  # #Need to create a cohesive ID columns to merge by
+  left_join(., select(RBD.RNAseq.manifest,-Final_Patient_ID),
+            by=c("Sample"="Sample")) %>%
+  
+  #Fill in the Sample info for those with BAM files but lacking counts from BCCA
+  mutate_at(vars(Lib_Prep), ~case_when(
+    is.na(.) ~ "RBD",
+    TRUE ~ .)) %>% 
+  mutate_at(vars(USI), ~case_when(
+    is.na(.) & grepl("PAVAVV.EOI2|.PAWCAW.EOI2", Sample) ~ str_split_fixed(Sample,"\\.", n=5)[,3],
+    is.na(.) & grepl("CB34pos|D7.EC", Sample)  ~ gsub("TARGET.20.(CB.+|D7.+)\\.00.01R", "\\1", Sample),
+    TRUE ~ . )) %>% 
+  mutate_at(vars(Protocol), ~case_when(
+    is.na(.) & grepl("PAVAVV.EOI2|.PAWCAW.EOI2", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("PAVAVV.EOI1|.PAWCAW.EOI1", Sample))[["Protocol"]]),
+    is.na(.) & grepl("CB34pos|D7.EC", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("CB34pos|D7.EC", Sample))[["Protocol"]]),
+    TRUE ~ .)) %>% 
+  
+    mutate_at(vars(AML_Subtype), ~case_when(
+    is.na(.) & grepl("PAVAVV.EOI2", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("PAVAVV.EOI1", Sample))[["AML_Subtype"]]),
+    is.na(.) & grepl(".PAWCAW.EOI2", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl(".PAWCAW.EOI1", Sample))[["AML_Subtype"]]),
+    is.na(.) & grepl("CB34pos|D7.EC", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("CB34pos|D7.EC", Sample))[["AML_Subtype"]]),
+    TRUE ~ .)) %>% 
+  
+    mutate_at(vars(Group), ~case_when(
+    is.na(.) & grepl("PAVAVV.EOI2|.PAWCAW.EOI2", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("PAVAVV.EOI1|.PAWCAW.EOI1", Sample))[["Group"]]),
+    is.na(.) & grepl("CB34pos|D7.EC", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("CB34pos|D7.EC", Sample))[["Group"]]),
+    TRUE ~ .)) %>% 
+  
+    mutate_at(vars(Batch), ~case_when(
+    is.na(.) & grepl("PAVAVV.EOI2", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("PAVAVV.EOI1", Sample))[["Batch"]]),
+    is.na(.) & grepl(".PAWCAW.EOI2", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl(".PAWCAW.EOI1", Sample))[["Batch"]]),
+    is.na(.) & grepl("CB34pos|D7.EC", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("CB34pos|D7.EC", Sample))[["Batch"]]),
+    TRUE ~ .)) %>% 
+  
+  mutate_at(vars(Time_point), ~case_when(
+    is.na(.) & grepl("PAVAVV.EOI2|.PAWCAW.EOI2", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("PAVAVV.EOI1|.PAWCAW.EOI1", Sample))[["Time_point"]]),
+    is.na(.) & grepl("CB34pos|D7.EC", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("CB34pos|D7.EC", Sample))[["Time_point"]]),
+    TRUE ~ .)) %>% 
+  
+  #Tissue,Primary.Fusion, Primary.CNV
+   mutate_at(vars(Tissue), ~case_when(
+    is.na(.) & grepl("PAVAVV.EOI2", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("PAVAVV.EOI1", Sample))[["Tissue"]]),
+    is.na(.) & grepl(".PAWCAW.EOI2", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl(".PAWCAW.EOI1", Sample))[["Tissue"]]),
+    is.na(.) & grepl("CB34pos|D7.EC", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("CB34pos|D7.EC", Sample))[["Tissue"]]),
+    TRUE ~ .)) %>% 
+   mutate_at(vars(Primary.Fusion), ~case_when(
+    is.na(.) & grepl("PAVAVV.EOI2", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("PAVAVV.EOI1", Sample))[["Primary.Fusion"]]),
+    is.na(.) & grepl(".PAWCAW.EOI2", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl(".PAWCAW.EOI1", Sample))[["Primary.Fusion"]]),
+    is.na(.) & grepl("CB34pos|D7.EC", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("CB34pos|D7.EC", Sample))[["Primary.Fusion"]]),
+    TRUE ~ .)) %>% 
+   mutate_at(vars(Primary.CNV), ~case_when(
+    is.na(.) & grepl("PAVAVV.EOI2", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("PAVAVV.EOI1", Sample))[["Primary.CNV"]]),
+    is.na(.) & grepl(".PAWCAW.EOI2", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl(".PAWCAW.EOI1", Sample))[["Primary.CNV"]]),
+    is.na(.) & grepl("CB34pos|D7.EC", Sample) ~ unique(filter(RBD.RNAseq.manifest, grepl("CB34pos|D7.EC", Sample))[["Primary.CNV"]]),
+    TRUE ~ .)) %>% 
+  
+  select(matches("Sample"),matches("PATIENT"), USI:Lib_Prep, everything())
+
+
+# dim(S3.BAMs.RBD.new) #677  11
+S3.BAMs.RBD.new
+```
+
+
+```{r}
+missing <- S3.BAMs.RBD.new %>% 
+  filter(is.na(PATIENT_ID_Original))
+
+
+missing
+```
+
+```{r}
+BAM.manifest.final <- BAM.manifest.cleaned %>% 
+  bind_rows(., S3.BAMs.RBD.new)
+
+dim(BAM.manifest.final)
+# write.csv(BAM.manifest.final, "BAM_manifests/TARGET_AML_Ribodepleted_and_PolyA_RNAseq_Bam_Manifest_07.14.21.csv")
+```
+
+#### August  2021
+
+```{r}
+manifest <- read.csv("BAM_manifests/00_Archive/TARGET_AML_Ribodepleted_and_PolyA_RNAseq_Bam_Manifest_07.14.21.csv", row.names = 1)
+
+
+head(manifest)
+dim(manifest) # 3532   25
+```
+
+```{r}
+sow1832 <- openxlsx::read.xlsx(file.path(TARGET,"RNA/mRNAseq/metadata/RNAseq_Submission_Manifests_SOWs/SOW_GSC-1832/Tracking_Sheet/SOW_GSC-1832_Data_Download_Tracking_Sheet_asOf_04.30.2021.xlsx")) %>% 
+  filter(!is.na(LIBRARY))
+
+# table(is.na(sow1832$LIBRARY)) #48 NAs 
+
+April2016_libraries <- data.frame(filename=dir(file.path(TARGET, "RNA/mRNAseq/level3/gene/2016Apr_BCCA_0531_LowDepth_Illumina_data"), pattern="normalized")) %>% 
+  mutate(PATIENT_ID_Original=gsub("^(TAR.+R)_A.+", "\\1", filename), 
+         Library=gsub("^.+R_(A[0-9]{5}).+", "\\1", filename), 
+         Batch="2016Apr") %>% 
+  select(-filename)
+  
+
+# April2016_libraries
+```
+
+
+```{r}
+manifest_update <- manifest %>% 
+    #Denote those with the longer reads available for use in the future
+  mutate(Read_Length_75bp="Yes",
+         Read_Length_150bp_on_SWIFT=case_when(
+           Library %in% sow1832$LIBRARY ~ "Yes", #Most accurate but there are 48 missing library IDs from the 
+           grepl("rem", Batch) ~ "Yes", #The "remission" SOW 1832 all had 150bp reads and 75bp trimmed reads. 
+           TRUE ~ "No")) %>% 
+  
+  #add in the Apr2016 
+  left_join(., April2016_libraries, by=c("PATIENT_ID_Original","Batch")) %>%
+  mutate(Library=case_when(
+    Batch != "2016Apr" ~ Library.x,
+    Batch == "2016Apr" ~ Library.y)) %>% 
+  group_by(filename) %>% 
+  mutate_at(vars(Library), ~collapseRows(., uniq = TRUE)) %>% 
+  ungroup() %>% 
+  
+  
+    mutate_at(vars(Group), ~gsub("CD34_NBM", "CD34_PB", .)) %>% 
+  mutate_at(vars(AML_Subtype), ~ifelse(Primary.Fusion=="FUS-TCF25", "AML, NOS", .)) %>% 
+  mutate_at(vars(Lib_Prep:Primary.Fusion,Primary.CNV), ~case_when(
+    is.na(.) & !grepl("NBM|Normal_PB|CD34_PB", Group) ~ "Unknown",
+    TRUE ~ .)) %>%
+  mutate_at(vars(Lib_Prep), ~ifelse(.=="RBS", "RBD", .)) %>%  #use RBD for ribodepleted, NOT "RBS"
+  select(Sample:Reg., Library,everything(), -Library.x, -Library.y) %>% 
+  distinct()
+
+
+# dim(manifest_update)
+```
+
+```{r}
+bams_with_rbd <- BAM.manifest %>% 
+   left_join(., select(rbd_manifest, Sample, Library,Lib_Prep, Has_Counts_Fusions_data), 
+            by=c("Sample","Library","Lib_Prep"))
+
+missing_counts <- bams_with_rbd %>% 
+  filter(is.na(Has_Counts_Fusions_data)) %>% 
+  filter(Lib_Prep=="RBD", 
+         !grepl("PATGIG|PATISD", Sample))
+
+
+table(missing_counts$Lib_Prep) #so now I need to find those library IDs!
+
+
+forBCCA.counts <- sow1832 %>% 
+  filter(grepl("CB34pos|D7-EC-GFP1|D7-EC-mock2|PAVAVV|PAWCAW", Sample.ID)) %>% 
+  filter(!grepl("PAVAVV-EOI1-14A|TARGET-20-PAWCAW-EOI1-14A-01R", EXTERNAL_IDENTIFIER)) %>% 
+  mutate_at(vars(EXTERNAL_IDENTIFIER), ~gsub("TARGET-20-PAWCAW-14A-01R","TARGET-20-PAWCAW-EOI2-14A-01R", .))
+
+
+# write.csv(forBCCA.counts, "TARGET_AML_Samples_Missing_Counts_and_Fusions_08.17.21.csv", row.names = FALSE)
+```
+
+```{r}
+BAM.manifest.fix <- manifest_update %>% 
+  filter(Sample %in% missing_counts$Sample)  %>% 
+  left_join(., forBCCA, by=c("Final_Patient_ID"="EXTERNAL_IDENTIFIER")) %>% 
+  mutate_at(vars(PATIENT_ID_Original), ~case_when(
+    is.na(.) ~ PATIENT_ID,
+    TRUE ~ .)) %>% 
+  mutate_at(vars(Library), ~case_when(
+    is.na(.) ~ LIBRARY,
+    TRUE ~ .)) %>% 
+  select(Sample:Read_Length_150bp_on_SWIFT)
+  
+
+# BAM.manifest.fix
+
+
+manifest_update <- manifest_update %>% 
+  filter(!Sample %in% BAM.manifest.fix$Sample) %>% 
+  bind_rows(.,  BAM.manifest.fix) %>% 
+  arrange(desc(Lib_Prep), Batch)
+
+
+dim(manifest_update)
+dim(manifest)
+
+# write.csv(BAM.manifest.updated, "TARGET_AML_Ribodepleted_and_PolyA_RNAseq_Bam_Manifest_08.12.21.csv", row.names = FALSE)
+```
+
+
+```{r}
+table(manifest_update$Lib_Prep)
+table(manifest_update$Read_Length_75bp)
+# table(manifest_update$Read_Length_150bp_on_SWIFT,
+#       manifest_update$Batch)
+```
+
+
+
+
+## Fastqs 
+
+### Rename TARGET Fastqs
+
+```{r}
+AWS_S3_Fastq_Manifest <- read.csv(file.path(TARGET, "SequencingDataMatrix/Fastq_manifests/TARGET_AML_RBD_PolyA_AWS_S3_Fastq_Manifest_11.17.20.csv")) %>% 
+  mutate(Lib_Prep=case_when(
+    Lib_Prep == "PolyA" ~ "polyA", 
+    Lib_Prep == "RBD" ~ "RBS"))
+
+
+head(AWS_S3_Fastq_Manifest)
+dim(AWS_S3_Fastq_Manifest) #2834 16
+
+# table(AWS_S3_Fastq_Manifest$Lib_Prep)
+```
+
+```{r}
+# dir(file.path(TARGET,"SequencingDataMatrix/"))
+bam_manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/BAM_manifests/TARGET_AML_Ribodepleted_RNAseq_Bam_Manifest_10.02.20.csv"), row.names = 1) %>% 
+  bind_rows(.,  read.csv(file.path(TARGET,"SequencingDataMatrix/BAM_manifests/TARGET_AML_polyA_RNAseq_Bam_Manifest_10.02.20.csv"))) %>% 
+  mutate(filename=gsub(".bam", "", filename)) %>% 
+  select(Sample, Lib_Prep,Batch,PATIENT_ID_Original, filename)
+
+
+head(bam_manifest)
+dim(bam_manifest) #2855    4
+
+
+# table(bam_manifest$Lib_Prep)
+table(bam_manifest$Sample %in% AWS_S3_Fastq_Manifest$Sample) #OK these are the HD NBM polyA RNAseq samples
+# bam_manifest$Sample[!bam_manifest$Sample %in% AWS_S3_Fastq_Manifest$Sample]
+table(AWS_S3_Fastq_Manifest$Sample %in%  bam_manifest$Sample) #OK these are the 4 missing BAMs during the shuffle to symlink drive. 
+```
+
+```{r}
+current_data <- read.delim(file.path(SCRATCH,"jlsmith3/Sbatch_AWS_Reorg/OldBucket_to_NewBucket/TARGET/fastqs_new_bucket.txt"),
+                           sep=" ", header=F) %>% 
+  dplyr::select(filename=V4, everything()) %>% 
+  mutate(Patient_ID=str_split_fixed(filename, pattern="_", n=3)[,1],
+         filename_base=gsub("_[Rr][12]{1}.+gz", "", filename)) %>%
+  dplyr::select(Patient_ID,filename_base, filename, everything()) 
+
+# head(current_data)
+# dim(current_data) #5872    5
+# current_data
+```
+
+```{r}
+S3_Bucket="s3://fh-pi-meshinchi-s/SR/picard_fq2/"
+
+AWS_S3_Fastq_rename <- AWS_S3_Fastq_Manifest %>% 
+  dplyr::left_join(., select(bam_manifest,-PATIENT_ID_Original,-Batch),
+            by=c("Sample","Lib_Prep")) %>% 
+  mutate_at(vars(filename), ~gsub(".srt$", "", .)) %>% 
+  arrange(Sample) %>% 
+  select(Sample,Batch,Lib_Prep, PATIENT_ID_Original, 
+         orignial_fastq_filename=fastq_sample_filename, final_fastq_filename=filename) %>% 
+  
+  #Need address the 4 missing BAM files that we do have fastqs 
+  mutate_at(vars(final_fastq_filename),~case_when(
+  Lib_Prep=="polyA" &  !grepl("_Replicate_",orignial_fastq_filename) & grepl("_Replicate_",final_fastq_filename) ~ orignial_fastq_filename, 
+  Lib_Prep=="polyA" & is.na(final_fastq_filename) ~ orignial_fastq_filename,
+  TRUE ~ . )) 
+
+
+# AWS_S3_Fastq_rename
+table(duplicated(AWS_S3_Fastq_rename$final_fastq_filename))
+table(is.na(AWS_S3_Fastq_rename$final_fastq_filename))
+# dim(AWS_S3_Fastq_rename) #2834    6
+
+
+AWS_S3_Fastq_rename_log <- AWS_S3_Fastq_rename %>%
+  select(Sample,Batch,Lib_Prep, PATIENT_ID_Original,
+         orignial_fastq_filename,final_fastq_filename) %>%
+  mutate(orignial_fastq_filename=paste0(S3_Bucket,orignial_fastq_filename)) %>%
+  bind_rows(., .) %>%
+  mutate_at(vars(orignial_fastq_filename,final_fastq_filename), ~case_when(
+    !duplicated(.) ~ paste0(.,"_r1.fq.gz"),
+    duplicated(.) ~ paste0(.,"_r2.fq.gz"))) %>%
+  arrange(Sample, orignial_fastq_filename)
+
+# AWS_S3_Fastq_rename_log
+# table(duplicated(AWS_S3_Fastq_rename_log$final_fastq_filename))
+# table(is.na(AWS_S3_Fastq_rename_log$final_fastq_filename))
+
+# write.csv(filter(AWS_S3_Fastq_rename_log, !final_fastq_filename %in% current_data$filename),
+#         file.path(SCRATCH, "jlsmith3/Sbatch_AWS_Reorg/OldBucket_to_NewBucket/TARGET/TARGET_AML_RBD_PolyA_AWS_S3_Fastq_Rename_Log_11.18.20.csv"),
+#           row.names = FALSE,
+#           quote = FALSE)
+
+
+
+# write.csv(AWS_S3_Fastq_rename_log,
+#           file.path(TARGET, "SequencingDataMatrix/Fastq_manifests/TARGET_AML_RBD_PolyA_AWS_S3_Fastq_Rename_Log_11.18.20.csv"),
+#           row.names = FALSE,
+#           quote = FALSE)
+
+
+# table(AWS_S3_Fastq_rename_log$final_fastq_filename %in% current_data$filename)
+```
+
+```{r}
+old_data <- read.delim(file.path(SCRATCH,"jlsmith3/Sbatch_AWS_Reorg/OldBucket_to_NewBucket/TARGET/fastqs_old_bucket.txt"), 
+                     header=FALSE, quote="", sep=" ") %>% 
+  dplyr::select(filename=V4, everything()) %>%
+  filter(!grepl("picard.stderr|^$|^out", filename)) %>% 
+  mutate(Patient_ID=str_split_fixed(filename, pattern="_", n=3)[,1],
+         filename_base=gsub("_[Rr][12]{1}.+gz", "", filename)) %>%
+  dplyr::select(Patient_ID,filename_base, filename, everything())
+
+
+head(old_data)
+tail(old_data)
+
+dim(old_data) #5670    
+```
+
+```{r}
+table(AWS_S3_Fastq_rename$orignial_fastq_filename %in% old_data$filename_base) #OK
+table(old_data$filename_base %in% AWS_S3_Fastq_rename$orignial_fastq_filename) #OK 2 missing are a duplicate from early testing of pipelines
+
+# old_data %>%  
+#   filter(!filename_base  %in%  AWS_S3_Fastq_rename$orignial_fastq_filename)
+# 
+# grep("PAUHFI-09A-01R", old_data$filename, value = T)
+```
+
+
+
+Missing BAM Files 
+TARGET-20-PARDYW-09A-01R_Replicate_withJunctionsOnGenome_dupsFlagged.bam
+TARGET-20-PASAXB-09A-01R_withJunctionsOnGenome_dupsFlagged.bam
+TARGET-20-PASVVS-09A-01R_withJunctionsOnGenome_dupsFlagged.bam
+TARGET-20-PATKPC-09A-01R_withJunctionsOnGenome_dupsFlagged.bam
+
+The relapse replicates are missing --
+Reps_relapse <- c("TARGET-20-PAVNUW-03A-01R",
+"TARGET-20-PATGTL-03A-01R",
+"TARGET-20-PASMSZ-03A-01R",
+"TARGET-20-PAXWMS-03A-01R")
+
+
+```{r}
+setdiff(missingData$PATIENT_ID_Original, dl_fails$PATIENT_ID_Original) 
+
+filter(AWS_S3_Fastq_Manifest, grepl("PAVNUW|PATGTL|PASMSZ|PAXWMS",Sample)) %>% 
+  select(fastq_sample_filename,Batch) %>% 
+  arrange(fastq_sample_filename)
+
+#missing the rlps1 replicates, but thier filenames were not identical...confusing
+filter(bam_manifest, grepl("PAVNUW|PATGTL|PASMSZ|PAXWMS",Sample)) %>% 
+  select(filename,Batch) %>% 
+  arrange(filename)
+```
+
+```{r}
+SRA_Fastq_Manifest <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Discovery_RNAseq_S3_Fastq_Manifest.txt"),
+                              header=FALSE) %>% 
+  dplyr::select(filename=V1) %>% 
+  mutate(Patient_ID=str_split_fixed(filename, pattern = "_", n=3)[,2],
+         Lib_Prep="polyA",
+         Group=case_when(
+           grepl("BM[0-9].+IX[0-9]", filename) ~ "HD_NBM",
+           grepl("BM[0-9]", Patient_ID) ~ "NBM",
+           grepl("P[A-Z]", Patient_ID) ~ "AML",
+           ),
+         Batch="Discovery",
+         Time_point=case_when(
+           Group == "AML" & grepl("09A|03A", Patient_ID) ~  "diagnostic",
+           Group == "AML" & grepl("04A|40A", Patient_ID) ~ "relapse",
+           grepl("NBM", Group) ~ Group,
+         ),
+         Tissue=case_when(
+           Group == "AML" & grepl("03A", Patient_ID) ~  "peripheral_blood",
+           Group == "AML" & grepl("09A", Patient_ID) ~  "bone_marrow",
+         TRUE ~ Group))  %>%
+  mutate(USI=str_split_fixed(Patient_ID,"-", n=5)[,3],
+         Sample=gsub("-",".", Patient_ID)) %>%
+  left_join(., dplyr::select(merged, USI,Protocol,ETS_Fusion,
+                      Primary.Fusion, Primary.CNV, Additional.Fusions.CNV), 
+            by="USI") %>% 
+  
+  mutate(AML_Subtype=case_when(
+    grepl("CBFA2T3-GLIS2",Primary.Fusion) | grepl("CBFA2T3-GLIS2",Additional.Fusions.CNV) ~ "CBFA2T3-GLIS2", 
+    grepl("NUP98-KDM5A",Primary.Fusion) | grepl("NUP98-KDM5A",Additional.Fusions.CNV) ~ "NUP98-KDM5A",
+    grepl("RBM15-MKL1",Primary.Fusion) | grepl("RBM15-MKL1",Additional.Fusions.CNV) ~ "RBM15-MKL1",
+    grepl("NUP98-NSD1",Primary.Fusion) | grepl("NUP98-NSD1",Additional.Fusions.CNV) ~ "NUP98-NSD1", 
+    grepl("ETV6|ETS|FUS", ETS_Fusion)  ~ "ETS-Fusion", 
+    grepl("CBFB-MYH11",Primary.Fusion) | grepl("CBFB-MYH11",Additional.Fusions.CNV) ~ "CBFB-MYH11", 
+    grepl("RUNX1-RUNX1T1",Primary.Fusion) | grepl("RUNX1-RUNX1T1",Additional.Fusions.CNV) ~ "RUNX1-RUNX1T1", 
+    grepl("KMT2A",Primary.Fusion) | grepl("KMT2A",Additional.Fusions.CNV) ~ "KMT2A", 
+    grepl("DEK-NUP214",Primary.Fusion) | grepl("DEK-NUP214",Additional.Fusions.CNV) ~ "DEK-NUP214",
+    grepl("None",Primary.Fusion)  ~ "No.Primary.Fusion",
+    TRUE ~ Group)) %>% 
+  dplyr::select(Sample,Patient_ID, USI,Protocol,everything(), -filename) %>% 
+  unique()
+  
+
+# table(SRA_Fastq_Manifest$Group)
+# table(SRA_Fastq_Manifest$Time_point)
+# table(SRA_Fastq_Manifest$AML_Subtype, useNA='ifany')
+# any(duplicated(SRA_Fastq_Manifest$Sample)) #FALSE
+
+
+head(SRA_Fastq_Manifest)
+# write.csv(SRA_Fastq_Manifest, "TARGET_AML_Discovery_RNAseq_AWS_S3_Fastq_Manifest_10.14.20.csv", row.names = FALSE)
+```
+
+
+### Updates
+
+#### August 2021
+
+```{r}
+SRA_Fastq_Manifest <- read.csv("Fastq_manifests/00_Archive/TARGET_AML_Discovery_RNAseq_AWS_S3_Fastq_Manifest_10.14.20.csv") %>% 
+  rename_at(vars(Patient_ID), ~"PATIENT_ID_Original") 
+
+# head(SRA_Fastq_Manifest)
+dim(SRA_Fastq_Manifest)
+```
+
+```{r}
+#read.csv("BAM_manifests/00_Archive/TARGET_AML_Ribodepleted_and_PolyA_RNAseq_Bam_Manifest_07.14.21.csv", row.names = 1)
+BAM.manifest <- read.csv("BAM_manifests/TARGET_AML_Ribodepleted_and_PolyA_RNAseq_Bam_Manifest_08.12.21.csv") %>% 
+  mutate(file_prefix=gsub(".srt.bam|.bam", "", filename))
+
+
+head(BAM.manifest)
+dim(BAM.manifest) # 3532   25
+```
+
+```{r}
+Fastq.manifest <- read.csv("Fastq_manifests/00_Archive/TARGET_AML_RBD_PolyA_AWS_S3_Fastq_Rename_Log_11.18.20.csv")
+
+dim(Fastq.manifest) #5668    6
+```
+
+```{r}
+creds <- aws.signature::use_credentials(profile = "default")
+Sys.setenv("AWS_ACCESS_KEY_ID" = creds$default$AWS_ACCESS_KEY_ID,
+           "AWS_SECRET_ACCESS_KEY" = creds$default$AWS_SECRET_ACCESS_KEY,
+           "AWS_DEFAULT_REGION"="us-west-2")
+
+BUCKET="fh-pi-meshinchi-s-eco-public"
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/Fastq"
+
+fastqs <- get_bucket_df(bucket = BUCKET, 
+                        prefix = PREFIX,
+                        max = Inf)
+head(fastqs) # 15429     8
+dim(fastqs)
+```
+
+```{r}
+fastqs.df <- fastqs %>% 
+  filter(!grepl(".md5", Key)) %>% 
+  mutate(filename=str_split_fixed(Key, pattern = "/", n=4)[,4], 
+         file_prefix=gsub(".fastq.gz|_r[12].fq.gz|_r[12].fastq.gz", "", filename)) %>% 
+  left_join(., select(BAM.manifest, file_prefix,Sample:Primary.CNV),
+            by="file_prefix") %>% 
+  
+  mutate_at(vars(Final_Patient_ID), ~case_when(
+    is.na(.) & grepl("SRA", filename) ~ str_split_fixed(str_split_fixed(Key, pattern = "/", n=4)[,4],
+                                                        pattern = "_", n=3)[,2],
+    is.na(.) & grepl("R[12]_concat", filename) ~ gsub("_r[12].fq.gz|_R[12]_.+|r[12].fastq.gz", "", 
+                    str_split_fixed(Key, pattern = "/", n=4)[,4]),
+    is.na(.) ~ str_split_fixed(gsub("_r[12].fq.gz|_R[12]_.+|r[12].fastq.gz", "", 
+                                    str_split_fixed(Key, pattern = "/", n=4)[,4]), 
+                    pattern = "_", n=2)[,1],
+    TRUE ~ .)) %>%
+  mutate_at(vars(Sample), ~case_when(
+    is.na(.) ~ gsub("-|_", ".", Final_Patient_ID),
+    TRUE ~ .)) %>%
+  
+  filter(Sample != "") %>% 
+  select(Sample:Final_Patient_ID,file_prefix,
+         PATIENT_ID_Original:Primary.CNV, 
+         filename, everything())
+
+# fastqs.df
+# dim(fastqs.df) # 7612   26
+```
+
+```{r}
+#These are duplicates since they were processed using Picard BEFORE the BAM files were renamed in a single batch months later. 
+fastqs.delete <- fastqs.df %>%
+  filter(is.na(Lib_Prep)) %>% 
+  filter(grepl("Temp", filename) | grepl("CBFA2T3_GLIS2|-GFP[1-3]|ML1-|OCI|REH|CB34pos|mock|ECandCBtransferexp|TF1|WSUAML", filename))
+
+dim(fastqs.delete) #272 fastq files
+# write.csv(fastqs.delete, "Fastq_manifests/TARGET_AML_AWS_fastqs_delete_8.11.21.csv", row.names = FALSE)
+```
+
+
+```{r}
+#These files have direct 1-to-1 mapping of BAM to Fastq file
+fastqs.df.OK <- fastqs.df %>% 
+  filter(!is.na(Lib_Prep))
+
+# dim(fastqs.df.OK) #7014 accounted for fully in BAMs 
+
+#These are ones that were dowloaded from the SRA as fastqs (so no associated BAM), or were provided by BCCA for a specific patient's sequencing, etc.
+fastqs.df.Fixed <- fastqs.df %>% 
+  filter(is.na(Lib_Prep)) %>% 
+  filter(!file_prefix %in% fastqs.delete$file_prefix) %>% 
+  select(-c(PATIENT_ID_Original:Primary.CNV)) %>% 
+  mutate(USI=case_when(
+    grepl("TAR", filename) ~ str_split_fixed(Sample, pattern="\\.", n=5)[,3], 
+    TRUE ~ Sample)) %>% 
+  select(Sample, USI, everything()) %>% 
+  left_join(., select(SRA_Fastq_Manifest, -Sample),
+            by="USI") %>% 
+  mutate_at(vars(PATIENT_ID_Original:Primary.CNV, AML_Subtype), ~case_when(
+    !grepl("SRA", filename) ~ NA_character_,
+    TRUE ~ .)) %>% 
+  select(Sample:Final_Patient_ID, PATIENT_ID_Original:Primary.CNV, everything())
+
+
+fastqs.df.Fixed2 <- fastqs.df.Fixed %>%
+  filter(is.na(Lib_Prep)) %>%
+  filter(grepl("TARGET", filename)) %>%
+  select(filename:Bucket) %>%
+  left_join(., select(Fastq.manifest,-orignial_fastq_filename),
+            by=c("filename"="final_fastq_filename")) %>%
+  mutate(Final_Patient_ID=PATIENT_ID_Original,
+         USI=str_split_fixed(Sample, pattern="\\.", n=5)[,3]) %>%
+  left_join(., select(merged, USI, Reg., Protocol, ETS_Fusion, Primary.Fusion,Primary.CNV, Additional.Fusions.CNV),
+            by="USI") %>%
+  mutate(AML_Subtype=case_when(
+    grepl("KMT2A", Primary.Fusion) ~ "KMT2A",
+    grepl("None", Primary.Fusion) ~ "No.Primary.Fusion"),
+    Group="AML",
+    Time_point="diagnostic",
+    Tissue="bone_marrow") %>%
+
+  #So, even though we have both fastq files from BAM files originally, at some point FH SCICOMP moved our files without our knowledge and ended up losing the BAM replicates.
+  #So these files were termed the "original" files when the fastqs were produced from the BAM files., but now will be considered replicates. Yes its confusing.
+  mutate_at(vars(Sample), ~ifelse(!grepl("[Rr]eplicate", .), paste0(.,"_Replicate"), .)) %>%
+  select(Sample:PATIENT_ID_Original, everything())
+
+fastqs.df.Fixed <- fastqs.df.Fixed %>%
+  filter(!c(is.na(Lib_Prep) & grepl("TARGET", filename))) %>%
+  mutate_at(vars(PATIENT_ID_Original), ~ifelse(is.na(.), Final_Patient_ID, .)) %>%
+  bind_rows(fastqs.df.Fixed2)
+
+
+dim(fastqs.df.Fixed) #326 files needed to have information merged  from other sources
+```
+
+```{r}
+sow1832 <- openxlsx::read.xlsx(file.path(TARGET,"RNA/mRNAseq/metadata/RNAseq_Submission_Manifests_SOWs/SOW_GSC-1832/Tracking_Sheet/SOW_GSC-1832_Data_Download_Tracking_Sheet_asOf_04.30.2021.xlsx")) %>% 
+  filter(!is.na(LIBRARY))
+
+# table(is.na(sow1832$LIBRARY)) #48 NAs 
+
+April2016_libraries <- data.frame(filename=dir(file.path(TARGET, "RNA/mRNAseq/level3/gene/2016Apr_BCCA_0531_LowDepth_Illumina_data"), pattern="normalized")) %>% 
+  mutate(PATIENT_ID_Original=gsub("^(TAR.+R)_A.+", "\\1", filename), 
+         Library=gsub("^.+R_(A[0-9]{5}).+", "\\1", filename), 
+         Batch="2016Apr") %>% 
+  select(-filename)
+# April2016_libraries
+
+
+Discovery <- read.delim("Fastq_manifests/SraRunTable_08.18.21.txt", sep=",", header=TRUE) %>% 
+  filter(!grepl("TARGET-21", submitted_subject_id),
+         grepl("BCCAGSC", Center.Name)) %>% 
+  select(biospecimen_repository_sample_id, Library.Name) %>% 
+  distinct()
+  
+# Discovery
+```
+
+
+```{r}
+Fastq.manifest.update <- fastqs.df.OK %>% 
+  mutate(Reg.= as.character(Reg.)) %>% 
+  bind_rows(fastqs.df.Fixed) %>% 
+  mutate_at(vars(Primary.Fusion), ~case_when(
+    is.na(.) & grepl("Kasumi", Sample) ~ "RUNX1-RUNX1T1", 
+    is.na(.) & grepl("MV4", Sample) ~ "KMT2A-AFF1",
+    TRUE ~ .)) %>% 
+  mutate_at(vars(Sample), ~case_when(
+    grepl("PATGIG|PATISD", Sample) & Lib_Prep=="RBS" ~ gsub("_replicate", "", .),
+    TRUE ~ .)) %>% 
+  mutate(Read=case_when(
+    grepl("_r[1].fq.gz|_R[1]_.+|r[1].fastq.gz", filename) ~ "Read1", 
+    grepl("_r[2].fq.gz|_R[2]_.+|r[2].fastq.gz", filename) ~ "Read2")) %>% 
+  
+  #Create two columns for each fastq file
+  pivot_wider(id_cols=c(Sample:Final_Patient_ID, PATIENT_ID_Original:Primary.CNV, Bucket), 
+              names_from=Read, 
+              values_from=filename) %>% 
+  
+  #Denote those with the longer reads available for use in the future
+  mutate(Read_Length_75bp="Yes",
+         Read_Length_150bp_on_SWIFT=case_when(
+           Library %in% sow1832$LIBRARY ~ "Yes", #Most accurate but there are 48 missing library IDs from the 
+           grepl("rem", Batch) ~ "Yes", #The "remission" SOW 1832 all had 150bp reads and 75bp trimmed reads. 
+           TRUE ~ "No")) %>% 
+  
+  #add in the Apr2016 
+  mutate_at(vars(Batch), ~gsub("PolyA","2016Apr", .)) %>% 
+  left_join(., April2016_libraries, by=c("PATIENT_ID_Original","Batch")) %>%
+  mutate(Library=case_when(
+    Batch != "2016Apr" ~ Library.x,
+    Batch == "2016Apr" ~ Library.y)) %>% 
+  group_by(Read1) %>% 
+  mutate_at(vars(Library), ~collapseRows(., uniq = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(Final_Patient_ID, Batch) %>% 
+  mutate_at(vars(Library), ~collapseRows(., uniq = TRUE)) %>% 
+  ungroup() %>% 
+  
+  mutate_at(vars(Group), ~gsub("CD34_NBM", "CD34_PB", .)) %>% 
+  mutate_at(vars(AML_Subtype), ~ifelse(Primary.Fusion=="FUS-TCF25", "AML, NOS", .)) %>% 
+  mutate_at(vars(Primary.Fusion:Primary.CNV), ~case_when(
+    grepl("Normal_PB|NBM|CD34_PB", Group) ~ Group,
+    grepl("Adult AML|Cordblood|JMML|APL", .) ~ NA_character_,
+    .=="" ~ NA_character_,
+    TRUE ~ .)) %>% 
+  mutate_at(vars(Read_Length_75bp:Read_Length_150bp_on_SWIFT), ~case_when(
+    Batch=="Unknown" | is.na(Batch) ~ "Unknown",
+    TRUE ~ .)) %>% 
+  mutate_at(vars(Lib_Prep), ~ifelse(.=="RBS", "RBD", .)) %>%  #use RBD for ribodepleted, NOT "RBS"
+  select(Sample:Reg., Library,everything(), -Library.x, -Library.y) %>% 
+  distinct() 
+
+
+libs_needed_rbd <- sow1832 %>% 
+  filter(grepl("CB34pos|D7-EC-GFP1|D7-EC-mock2|PAVAVV|PAWCAW", Sample.ID)) %>% 
+  filter(!grepl("PAVAVV-EOI1-14A|TARGET-20-PAWCAW-EOI1-14A-01R", EXTERNAL_IDENTIFIER)) %>% 
+  mutate_at(vars(EXTERNAL_IDENTIFIER), ~gsub("TARGET-20-PAWCAW-14A-01R","TARGET-20-PAWCAW-EOI2-14A-01R", .))
+
+Fastq.manifest.update.libs <- Fastq.manifest.update %>% 
+  filter(!is.na(Library))
+
+Fastq.manifest.update.Nolibs <-  Fastq.manifest.update %>% 
+  filter(is.na(Library)) %>% 
+  mutate_at(vars(PATIENT_ID_Original), ~ifelse(is.na(.), Final_Patient_ID, .)) %>% 
+  left_join(., select(libs_needed_rbd,EXTERNAL_IDENTIFIER,  LIBRARY), 
+            by=c("Final_Patient_ID"="EXTERNAL_IDENTIFIER")) %>% 
+  left_join(., Discovery,
+            by=c("Final_Patient_ID"="biospecimen_repository_sample_id")) %>% 
+  mutate_at(vars(Library), ~case_when(
+    is.na(.) & ! is.na(LIBRARY) ~ LIBRARY, 
+    is.na(.) & ! is.na(Library.Name) ~ Library.Name,
+    TRUE ~ .)) %>% 
+  select(-LIBRARY, -Library.Name)
+  
+
+
+# Fastq.manifest.update.Nolibs #165
+# View(Fastq.manifest.update.Nolibs)
+
+
+Fastq.manifest.update <- Fastq.manifest.update.libs %>% 
+  bind_rows(Fastq.manifest.update.Nolibs) %>% 
+  arrange(desc(Lib_Prep), Group)
+
+
+
+dim(Fastq.manifest.update) # 3670   21
+
+# write.csv(Fastq.manifest.update, "Fastq_manifests/TARGET_AML_RNAseq_Fastq_File_Manifest_08.11.21.csv", row.names = FALSE)
+# write.csv(select(Fastq.manifest.update,-Reg.), "Fastq_manifests/TARGET_AML_RNAseq_Fastq_File_Manifest_shareable_08.11.21.csv", row.names = FALSE)
+```
+
+```{r}
+table(Fastq.manifest.update$Lib_Prep)
+table(Fastq.manifest.update$Group)
+table(Fastq.manifest.update$Batch)
+
+# Fastq.manifest.update %>% 
+#   filter(Lib_Prep=="Unknown") %>% 
+#   write.csv(., "TARGET_AML_Unknown_Fastqs.csv", row.names = FALSE)
+```
+
+```{r}
+RNAseq0531 <- Fastq.manifest.update %>% 
+  filter(Protocol=="AAML0531") %>% 
+  select(Sample,USI, Lib_Prep:Primary.CNV) %>% 
+  arrange(Lib_Prep, AML_Subtype, Sample)
+
+length(unique(RNAseq0531$USI)) #618
+# write.csv(RNAseq0531, "TARGET_AML_0531_RNAseq_Sample_Manifest.csv", row.names = FALSE)
+```
+
+```{bash eval=FALSE}
+filenames=$(cat TARGET_AML_AWS_fastqs_delete_8.11.21.csv | cut -f 3 -d  "," | grep -v "filename" | tr -d "\"") 
+for file in $(echo "$filenames"); 
+do  
+  aws s3 rm  s3://$BUCKET/$PREFIX/ --recursive --exclude "*" --include "${file}*" ;
+done 
+```
+
+
+### BASH Code
+
+```{bash}
+cat TARGET_AML_RBD_PolyA_AWS_S3_Fastq_Rename_Log_11.10.20.csv | cut -f 5 -d "," | grep -v "orig" > RBD_PolyA_to_New_Bucket.txt
+cat TARGET_AML_RBD_PolyA_AWS_S3_Fastq_Rename_Log_11.10.20.csv | cut -f 6 -d "," | grep -v "final" > RBD_PolyA_New_Filenames.txt
+
+prefix="TARGET_AML/RNAseq_Illumina_Data/Fastq"
+sbatch ~/scripts/sbatch_jobs/Upload_Rename_Fastqs_S3.sh RBD_PolyA_to_New_Bucket.txt RBD_PolyA_New_Filenames.txt $prefix 
+```
+
+```{bash}
+aws s3 ls s3://fh-pi-meshinchi-s/SR/SRA/ | tr -s " " | cut -f 4 -d  " " | sed -E "s|^(.+)$|s3://fh-pi-meshinchi-s/SR/SRA/\1|" > SRA_to_New_Bucket.txt
+
+sbatch ~/scripts/sbatch_jobs/Upload_S3.sh SRA_to_New_Bucket.txt "TARGET_AML/RNAseq_Illumina_Data/Fastq"
+```
+
+
+#### SWOG
+
+```{bash}
+aws s3 ls s3://fh-pi-meshinchi-s/SR/SWOG/ | tr -s "" | cut -f 4 -d " " | sed -E "s|^(.+)|s3://fh-pi-meshinchi-s/SR/SWOG/\1|" > SWOG_to_New_Bucket.txt
+
+sbatch ~/scripts/sbatch_jobs/Upload_S3.sh SWOG_to_New_Bucket.txt "SWOG_AML/RNAseq_Illumina_Data/Fastq"
+```
+
+#### BEAT AML
+
+```{bash}
+aws s3 ls s3://fh-pi-meshinchi-s/SR/BEAT_AML/RNAseq_Illumina_Data/Fastq/ | tr -s " " | cut  -f 4 -d " " | sed -E "s|^(.+)$|s3://fh-pi-meshinchi-s/SR/BEAT_AML/RNAseq_Illumina_Data/Fastq/\1|" > BEAT_AML_to_New_Bucket.txt
+
+sbatch ~/scripts/sbatch_jobs/Upload_S3.sh BEAT_AML_to_New_Bucket.txt "BEAT_AML/RNAseq_Illumina_Data/Fastq"
+```
+
+#### St. Jude
+
+```{bash}
+aws s3 ls s3://fh-pi-meshinchi-s/SR/dnanexus_picard_fq2/ | tr -s " " | cut -f 4 -d " " | sed -E "s|^(.+)$|s3://fh-pi-meshinchi-s/SR/dnanexus_picard_fq2/\1|" > St.Jude_to_New_Bucket.txt 
+
+cat St.Jude_to_New_Bucket.txt | grep -v -E "SJAML|SJCBF"  > St.Jude_ALL_to_New_Bucket.txt
+sbatch ~/scripts/sbatch_jobs/Upload_S3.sh St.Jude_ALL_to_New_Bucket.txt "St.Jude_ALL/RNAseq_Illumina_Data/Fastq"
+
+cat St.Jude_to_New_Bucket.txt | grep -E "SJAML|SJCBF"  > St.Jude_AML_to_New_Bucket.txt
+sbatch ~/scripts/sbatch_jobs/Upload_S3.sh St.Jude_AML_to_New_Bucket.txt "St.Jude_AML/RNAseq_Illumina_Data/Fastq"
+```
+
+
+
+
+
+# miRNAseq  files
+
+```{r}
+manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/TARGET_AML_RBD_0531_1031_miRNAseq_mRNAseq_Manifest_v5.csv"))%>% 
+  filter(miRNAseq_isoform.txt != 0) %>% 
+  dplyr::select(Group=Type, everything(),-Protocol) %>% 
+  mutate(Sample=gsub("-",".",Final_Patient_ID)) %>% 
+  mutate_at(vars(Sample), ~ifelse(Replicate=="Replicate",paste0(.,"_replicate"), .)) %>%
+  mutate_at(vars(Batch), ~paste0("dx", as.character(.))) %>%
+  left_join(., dplyr::select(merged, USI,ETS_Fusion,Protocol,
+                      Primary.Fusion, Primary.CNV, Additional.Fusions.CNV),
+            by="USI") %>% 
+  mutate_at(vars(Protocol), ~ifelse(is.na(.), Group, .)) %>% 
+  mutate(Time_point=case_when(
+        Group == "AML" &  grepl("03A|09A", Sample) ~ "diagnostic",
+        Group == "AML" &  grepl("40A|04A", Sample) ~ "relapse",
+        Group == "AML" & grepl("10A|14A", Sample) ~ "remission", 
+        TRUE ~ Group), 
+    Tissue=case_when(
+        grepl("09A|14A|04A", Sample) ~ "bone_marrow",
+        grepl("03A|40A|10A", Sample) ~ "peripheral_blood",
+        TRUE ~ Group)) %>% 
+  mutate(AML_Subtype=case_when(
+    grepl("CBFA2T3-GLIS2",Primary.Fusion) | grepl("CBFA2T3-GLIS2",Additional.Fusions.CNV) ~ "CBFA2T3-GLIS2", 
+    grepl("NUP98-KDM5A",Primary.Fusion) | grepl("NUP98-KDM5A",Additional.Fusions.CNV) ~ "NUP98-KDM5A",
+    grepl("RBM15-MKL1",Primary.Fusion) | grepl("RBM15-MKL1",Additional.Fusions.CNV) ~ "RBM15-MKL1",
+    grepl("NUP98-NSD1",Primary.Fusion) | grepl("NUP98-NSD1",Additional.Fusions.CNV) ~ "NUP98-NSD1", 
+    grepl("ETV6|ETS|FUS", ETS_Fusion)  ~ "ETS-Fusion", 
+    grepl("CBFB-MYH11",Primary.Fusion) | grepl("CBFB-MYH11",Additional.Fusions.CNV) ~ "CBFB-MYH11", 
+    grepl("RUNX1-RUNX1T1",Primary.Fusion) | grepl("RUNX1-RUNX1T1",Additional.Fusions.CNV) ~ "RUNX1-RUNX1T1", 
+    grepl("KMT2A",Primary.Fusion) | grepl("KMT2A",Additional.Fusions.CNV) ~ "KMT2A", 
+    grepl("DEK-NUP214",Primary.Fusion) | grepl("DEK-NUP214",Additional.Fusions.CNV) ~ "DEK-NUP214",
+    grepl("None",Primary.Fusion)  ~ "No.Primary.Fusion",
+    TRUE ~ Group)) %>% 
+  dplyr::select(Sample,everything(),
+         -c(miRNAseq_PROTOCOL:miRNAseq_mirnas.txt),
+         -Replicate,-Reg.,-c(LIBRARY.mRNA:mRNAseq_PROTOCOL),-ETS_Fusion,
+         -mRNAseq_dupsFlagged.bam,-mRNAseq_coverage.transcript.normalized) %>% 
+  arrange(Sample)
+
+
+head(manifest)
+# dim(manifest) #1315   20
+
+# table(manifest$Protocol, useNA = 'ifany')
+# table(manifest$Group, useNA = 'ifany')
+# table(manifest$Batch, useNA = 'ifany')
+# table(manifest$Time_point,  useNA = 'ifany')
+# table(manifest$Tissue,  useNA = 'ifany')
+
+
+# write.csv(manifest, file.path(TARGET,"SequencingDataMatrix/TARGET_AML_miRNAseq_Manifest_10.08.20.csv"), row.names = T)
+```
+
+```{r}
+# dir(file.path(TARGET,"SequencingDataMatrix/SRA"))
+sra <- read.csv(file.path(TARGET,"SequencingDataMatrix/SRA/SraRunTable_TARGET_Cohorts_9.1.20.txt")) %>%
+  filter(grepl("TARGET-2[01]-|TARGET-00", biospecimen_repository_sample_id)) %>% 
+  filter(Assay.Type=="miRNA-Seq", grepl("AML", study_name)) %>% 
+  dplyr::select(Patient_ID=biospecimen_repository_sample_id, 
+         submitted_subject_id,
+         study_name, sex,study_design,
+         LIBRARY.miRNA=Library.Name,Assay.Type,
+         Group=histological_type,
+         body_site,LibrarySource:Platform,
+         Center.Name:Consent, gap_accession, 
+         Genome=Assembly..run.,AssemblyName,BioProject,BioSample) %>%
+  mutate(Sample=gsub("-",".",Patient_ID),
+         USI=str_split_fixed(Patient_ID,"-", n=5)[,3]) %>% 
+  dplyr::select(Sample, USI,everything(),-submitted_subject_id)
+
+
+head(sra)
+# dim(sra)
+
+# table(sra$Assay.Type, useNA='ifany')
+# table(sra$histological_type)
+# table(sra$Library.Name %in% manifest$LIBRARY.miRNA)
+```
+
+```{r}
+sra_only <- sra %>% 
+  filter(!LIBRARY.miRNA %in% manifest$LIBRARY.miRNA) %>% 
+  left_join(., dplyr::select(merged, USI,ETS_Fusion,Protocol,
+                      Primary.Fusion, Primary.CNV, Additional.Fusions.CNV),
+            by="USI") %>% 
+  mutate_at(vars(Protocol), ~case_when(
+            is.na(.) & Group != "AML" ~ Group,
+            is.na(.) & Group == "AML" ~ "Unknown",
+            TRUE ~ .)) %>% 
+  mutate(Time_point=case_when(
+        Group == "AML" &  grepl("03A|09A", Sample) ~ "diagnostic",
+        Group == "AML" &  grepl("40A|04A", Sample) ~ "relapse",
+        Group == "AML" & grepl("10A|14A", Sample) ~ "remission",
+        Group == "AML" & grepl("41A|42A", Sample) ~ "refractory",
+        TRUE ~ Group), 
+    Tissue=case_when(
+        grepl("09A|14A|04A|41A", Sample) ~ "bone_marrow",
+        grepl("03A|40A|10A|42A", Sample) ~ "peripheral_blood",
+        TRUE ~ Group)) %>% 
+  mutate(AML_Subtype=case_when(
+    grepl("CBFA2T3-GLIS2",Primary.Fusion) | grepl("CBFA2T3-GLIS2",Additional.Fusions.CNV) ~ "CBFA2T3-GLIS2", 
+    grepl("NUP98-KDM5A",Primary.Fusion) | grepl("NUP98-KDM5A",Additional.Fusions.CNV) ~ "NUP98-KDM5A",
+    grepl("RBM15-MKL1",Primary.Fusion) | grepl("RBM15-MKL1",Additional.Fusions.CNV) ~ "RBM15-MKL1",
+    grepl("NUP98-NSD1",Primary.Fusion) | grepl("NUP98-NSD1",Additional.Fusions.CNV) ~ "NUP98-NSD1", 
+    grepl("ETV6|ETS|FUS", ETS_Fusion)  ~ "ETS-Fusion", 
+    grepl("CBFB-MYH11",Primary.Fusion) | grepl("CBFB-MYH11",Additional.Fusions.CNV) ~ "CBFB-MYH11", 
+    grepl("RUNX1-RUNX1T1",Primary.Fusion) | grepl("RUNX1-RUNX1T1",Additional.Fusions.CNV) ~ "RUNX1-RUNX1T1", 
+    grepl("KMT2A",Primary.Fusion) | grepl("KMT2A",Additional.Fusions.CNV) ~ "KMT2A", 
+    grepl("DEK-NUP214",Primary.Fusion) | grepl("DEK-NUP214",Additional.Fusions.CNV) ~ "DEK-NUP214",
+    grepl("None",Primary.Fusion)  ~ "No.Primary.Fusion",
+    TRUE ~ Group)) %>% 
+  dplyr::select(Sample:Patient_ID, Protocol,Group,Time_point:AML_Subtype,Primary.Fusion:Additional.Fusions.CNV,
+         everything(), -ETS_Fusion)
+
+
+head(sra_only)
+
+# table(sra_only$Protocol, useNA = 'ifany')
+# table(sra_only$Group, useNA = 'ifany')
+# table(sra_only$Time_point,  useNA = 'ifany')
+# table(sra_only$Tissue,  useNA = 'ifany')
+table(sra_only$Sample %in% manifest$Sample)
+table(sra_only$USI %in% manifest$USI)
+
+# write.csv(sra_only, file.path(TARGET,"SequencingDataMatrix/TARGET_AML_miRNAseq_Manifest_priorTo2017Batches_10.08.20.csv"), row.names = F)
+```
+
+```{r}
+miRNA_bams_df <- data.frame(filepath=c(dir("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/miRNAseq/level1/bam",
+                                      pattern="*.ba[mi]$", recursive = T, full.names = T))) %>% 
+   filter(!grepl("ccs.bam", filepath)) %>% #these are on S3 already. Need to delete
+  mutate(filename=basename(filepath), 
+         path=dirname(filepath)) %>% 
+  mutate(Lib_Prep=case_when(
+    grepl("miRNAseq", path) ~ "miRNAseq",
+    grepl("PolyAEnriched|2020Aug_FHCRC_ProjectStElla_Illumina_data|2016Apr_BCCA_0531|2011_HudsonAlpha_0531_Illumina_data", path) ~ "polyA_mRNAseq",
+    grepl("Ribodepletion|2017July_BCCA_1031_Illumina_data", path) ~ "RBD_mRNAseq",
+  )) %>%
+  arrange(filename) %>%
+  group_by(filename) %>% 
+  mutate(keep=case_when(
+    n() == 1 ~ TRUE,
+    n() == 2 & grepl("/fh/fast/meshinchi_s/workingDir/", path) ~ TRUE,#these are symlinks - they will be followed
+    n() == 2 & !grepl("/fh/fast/meshinchi_s/workingDir/", path) ~ FALSE,  #actual hard-drive stored. 
+  )) %>% 
+  ungroup() %>% 
+  filter(keep) 
+```
+
+
+#Older Code 
+
+```{r}
+#Jenny Smith 
+# Aug 2018
+#
+
+options(stringsAsFactors=FALSE)
+
+library(dplyr)
+library(stringr)
+
+setwd("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/SequencingDataMatrix/")
+
+manifest <- read.csv("TARGET_AML_0531_1031_miRNAseq_Ribodepletion_mRNAseq_Manifest_v3.csv")
+
+head(manifest)
+dim(manifest)
+
+
+miRNA <- read.csv("TARGET_AML_0531_1031_miRNAseq_Manifest.csv") %>% 
+  filter(grepl("14A|03A|09A",Sample_Name)) %>% 
+  filter(grepl("TARGET-20", Sample_Name)) %>% 
+  filter(USI %in% manifest$USI) %>%
+  filter(!duplicated(USI))
+
+
+head(miRNA)
+dim(miRNA) #1223
+
+
+miRNA.v21 <- read.delim("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/miRNAseq/level3/matureMiRNA/2017July_BCCA_1031_miRBase21_Illumina_data/README_miRNA.txt") %>% 
+  mutate(USI=str_split_fixed(Target_ID, pattern = "-", n = 3)[,1])
+
+
+
+head(miRNA.v21)
+
+
+manifest_v4 <- manifest %>%
+  left_join(., dplyr::select(miRNA,USI, Library_Name), by="USI") %>%
+  mutate(LIBRARY.miRNA=case_when(
+    is.na(LIBRARY.miRNA) & !is.na(Library_Name) ~ Library_Name,
+    TRUE ~ LIBRARY.miRNA)) %>% 
+  mutate_at(vars(miRNAseq_isoform.txt, miRNAseq_mirnas.txt), funs(as.numeric(.)))  %>% 
+  mutate_at(vars(miRNAseq_isoform.txt, miRNAseq_mirnas.txt),
+            funs(case_when(
+              !is.na(LIBRARY.miRNA) ~ as.double(1),
+              TRUE ~ .))) %>% 
+  mutate(miRBase_v21=case_when(
+    USI %in% miRNA.v21$USI & Replicate != "Replicate" ~ "Yes", 
+    is.na(LIBRARY.miRNA) ~ "NA", 
+    TRUE ~ "No")) %>%
+  dplyr::select(Final_Patient_ID,      
+         PATIENT_ID_Original,   
+         USI,  
+         Reg., 
+         Type, 
+         Protocol, 
+         Batch, 
+         Replicate,
+         LIBRARY.miRNA,
+         miRBase_v21,everything(),
+         -Library_Name)
+
+
+
+head(manifest_v4)
+dim(manifest_v4)
+
+# write.csv(manifest_v4,"TARGET_AML_0531_1031_miRNAseq_Ribodepletion_mRNAseq_Manifest_v4.csv", row.names = FALSE)
+
+
+LD.0531 <- data.frame(BAMs=dir("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level1/bam/2016Apr_BCCA_0531_PolyAEnriched_Illumina_data/", 
+               pattern = "*.bam$")) %>% 
+  mutate(USI=str_split_fixed(BAMs, "-", n=5)[,3]) %>% 
+  filter(!grepl("^BM", USI))
+
+
+head(LD.0531)
+dim(LD.0531)
+
+
+
+forCDE <- manifest_v4 %>% 
+  dplyr::select(Final_Patient_ID, USI, Reg., Protocol, Type) %>% 
+  filter(Type != "NBM")
+
+
+####### Update Protocol for Batch 2 
+
+options(stringsAsFactors = FALSE)
+
+new1031 <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/Clinical/CDE/1031/AAML1031_TARGET_CDEs_with_HiAR_PrimaryCyto_and_FusionCalls_05.20.19.csv")
+
+merged <- read.csv("~/reference_mapping-files/TARGET_AML_0531_1031_merged_CDEs_3.01.19.csv")
+
+manifest <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/SequencingDataMatrix/TARGET_AML_0531_1031_miRNAseq_Ribodepletion_mRNAseq_Manifest_v4.csv")
+
+
+
+IDs <- bind_rows(dplyr::select(manifest, Reg., USI),
+                 dplyr::select(merged, Reg.,USI) %>% 
+                   mutate(Reg.=as.character(Reg.))) %>% 
+  arrange(USI, Reg.) %>% 
+  unique()
+
+head(IDs)
+
+dup.reg <- IDs %>% 
+  filter(duplicated(Reg.) | duplicated(Reg., fromLast = TRUE)) %>% 
+  arrange(Reg.) %>% 
+  filter(!is.na(Reg.) & !is.na(USI)) %>% 
+  dplyr::select(Reg., USI2=USI) %>%
+  set_rownames(.$Reg.)
+
+new1031.updated <- new1031 %>% 
+  dplyr::select(Reg.=Patient.registration.number, USI) %>% 
+  mutate(Reg.=as.character(Reg.)) %>%
+  left_join(., dup.reg, by=c("Reg.")) %>% 
+  mutate(USI=ifelse(Reg. %in% dup.reg$Reg., USI2,USI)) %>% 
+  dplyr::select(-USI2)
+
+
+length(intersect(manifest$Reg.[is.na(manifest$Protocol)], new1031$Patient.registration.number)) #26
+table(new1031$Study, useNA = "always")
+table(manifest$Protocol, useNA = "always")
+      
+manifest.v5 <- manifest %>% 
+  mutate(Protocol=ifelse(is.na(Protocol) & Reg. %in%  intersect(.$Reg., new1031$Patient.registration.number), "AAML1031", Protocol))
+
+table(manifest.v5$Protocol, useNA = "always")
+
+
+# write.csv(manifest.v5,"TARGET_AML_0531_1031_miRNAseq_Ribodepletion_mRNAseq_Manifest_v5.csv", row.names = FALSE)
+```
+
+```{r}
+####### Update Protocol for Relapse Batch 3 and DS-AML 
+
+manifest <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/SequencingDataMatrix/TARGET_AML_0531_1031_miRNAseq_Ribodepletion_mRNAseq_Manifest_v5.csv") %>% 
+  filter(!(USI %in% c("PATGIG","PATISD") & duplicated(USI)))
+
+head(manifest)
+dim(manifest)
+
+manifest_relapse <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/SequencingDataMatrix/TARGET_AML_RBD_Relapse_Manifest_v2.csv", row.names = 1) %>% 
+  rename(LIBRARY.mRNA=GSC.library)
+
+head(manifest_relapse)
+dim(manifest_relapse)
+
+IDmap <- manifest %>% 
+  filter(!is.na(manifest$LIBRARY.mRNA)) %>%
+  dplyr::select(PATIENT_ID_Original, Final_Patient_ID, LIBRARY.mRNA, Batch) %>% 
+  bind_rows(.,dplyr::select(manifest_relapse,PATIENT_ID_Original=Sample.ID,LIBRARY.mRNA) %>% 
+              filter(LIBRARY.mRNA != "")) %>% 
+  mutate(Batch=ifelse(is.na(Batch), 3, Batch)) %>% 
+  filter(grepl("PAVNUW",PATIENT_ID_Original))
+
+head(IDmap)
+tail(IDmap)
+
+#Update 
+```
+

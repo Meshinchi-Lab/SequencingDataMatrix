@@ -1,0 +1,111 @@
+---
+title: "Create Updated Data Matrix for TARGET/AAML1031 samples"
+author: "Jenny Smith"
+date: "April 6, 2020"
+output: html_document
+---
+  
+  
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE,
+                      fig.align='center', fig.height = 5, fig.width = 5)
+options(stringsAsFactors = FALSE)
+```
+
+```{r message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+getwd()
+```
+
+```{r}
+source("~/scripts/conversion_scripts/Merge_Cat_FixDupIDs_Function.r")
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/R/rmDupGenes_Function.r")
+```
+
+
+#Read in the CDEs
+
+```{r}
+# dir(file.path(CDE,"Merged"))
+merged <- read.csv(file.path(CDE,"Merged","TARGET_AML_0531_1031_merged_CDEs_2.12.20.csv"))
+
+dim(merged)
+```
+
+```{r}
+table(is.na(merged$Reg.))
+table(merged$USI == "Unknown")
+```
+
+
+#Previous Seq Data Matrix
+
+```{r}
+# dir(file.path(TARGET,"SequencingDataMatrix","archive"))
+data_matrix <- read.csv(file.path(TARGET,"SequencingDataMatrix","archive",
+                                  "TARGET_AML_0531_1031_SeqDataAvailability_3.29.18.csv"))
+
+dim(data_matrix)
+```
+
+
+#Data Types Available
+
+```{r}
+data_types <- dir(path = TARGET, pattern = "^[RDF]")
+data_types
+```
+
+
+#Identify Patient Level Files
+
+```{r}
+file_lists <- list()
+
+for (type in data_types[3]){
+  pt.files <- dir(file.path(TARGET,type),recursive = TRUE,pattern = "level")
+  
+  print(pt.files)
+}
+```
+
+
+
+#Identify Concatenated Files 
+
+```{r}
+#Pattern to select the Target Barcode
+pattern <- "^.+\\/([BPR][A-Z0-9].+R)\\_.+"
+```
+
+```{r}
+#Select the column indices 
+selected <- c(1,2)
+```
+
+
+
+
+
+NOTE:
+  
+  If markdown cannot be completed with pandoc (memory issues), use the following
+
+> library("rmarkdown")
+> render("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/TARGET_AML_1031_Cat_RNAseq.Rmd", "html_document")
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+

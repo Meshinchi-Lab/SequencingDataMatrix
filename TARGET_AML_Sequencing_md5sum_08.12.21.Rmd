@@ -1,0 +1,285 @@
+---
+title: "TARGET AML Create M5sum checks"
+author: "Jenny Smith"
+date: "September 28, 2020"
+output: html_document
+---
+
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(TARGET,'SequencingDataMatrix/'))
+table = function (..., useNA = 'always') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height=5, fig.width=8)
+options(stringsAsFactors = FALSE)
+
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(gtools)
+
+library(aws.s3)
+library(aws.signature)
+
+library(DeGSEA)
+getwd()
+```
+
+
+
+# Read in the Clinical Data
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_05.21.21.csv"))
+
+
+merged <- merged %>%
+  filter(!is.na(USI), !grepl("Unknown", USI))
+
+head(merged[,1:5])
+dim(merged) #2314  150
+```
+
+```{r}
+table(merged$Protocol)
+```
+
+
+
+# Read in the Manifests 
+
+## RNAseq Counts Matrix Manifests
+
+```{r}
+rbd_manifest <- read.csv("TARGET_AML_Ribodepleted_Manifest_08.12.21.csv") %>% 
+  mutate(Has_Counts_Fusions_data="Yes")
+
+# dim(rbd_manifest)
+head(rbd_manifest)
+
+# any(is.na(rbd_manifest$Library))
+```
+
+```{r}
+#2 samples missing library OK
+# rbd_manifest %>% 
+#   filter(is.na(Library))
+
+table(rbd_manifest$Lib_Prep)
+
+
+#only 47/50 cord blood samples have counts and fusions. 
+# rbd_manifest %>%
+#   filter(grepl("cord_blood", Tissue))
+```
+
+
+## BAMS
+
+```{r}
+sow1832 <- openxlsx::read.xlsx(file.path(TARGET,"RNA/mRNAseq/metadata/RNAseq_Submission_Manifests_SOWs/SOW_GSC-1832/Tracking_Sheet/SOW_GSC-1832_Data_Download_Tracking_Sheet_asOf_04.30.2021.xlsx")) %>% 
+   mutate_at(vars(EXTERNAL_IDENTIFIER), ~gsub("TARGET-20-PAWCAW-14A-01R","TARGET-20-PAWCAW-EOI2-14A-01R", .))
+
+
+
+sow1832_NAs <- sow1832 %>% 
+  filter(is.na(LIBRARY))
+  
+  
+sow1832 <- sow1832 %>% 
+  filter(!is.na(LIBRARY))
+
+head(sow1832)
+# dim(sow1832) #725 samples - we have 677 BAM files
+# table(sow1832$`Downloaded.BAM.file?`)
+
+
+# forBCCA.bams <- write.csv(sow1832_NAs,"TARGET_AML_Samples_Missing_BAMs_08.17.21.csv", row.names=FALSE)
+# table(sow1832_NAs$`Downloaded.BAM.file?`)
+```
+
+So we are missing 48 BAM files, and at least 37/48 have counts and fusion data provided 
+
+```{r}
+BAM.manifest  <- read.csv("BAM_manifests/TARGET_AML_Ribodepleted_and_PolyA_RNAseq_Bam_Manifest_08.12.21.csv") 
+
+# dim(BAM.manifest) #3532   27
+head(BAM.manifest)
+
+# table(BAM.manifest$Lib_Prep)
+# table(BAM.manifest$Batch)
+```
+
+```{r}
+rbd_with_bams <- rbd_manifest %>% 
+  left_join(., select(BAM.manifest, Sample, Library,Lib_Prep, filename), 
+            by=c("Sample","Library"))
+# dim(rbd_with_bams)
+
+
+missing_bams <- rbd_with_bams %>% 
+  filter(is.na(filename))
+
+
+dim(missing_bams) #37 20
+table(missing_bams$Batch)
+
+# table(sow1832_NAs$Sample.ID %in% missing_bams$PATIENT_ID_Original) #36 are included in both mssing BAMs and those with out BAM
+# write.csv(missing_bams,"TARGET_AML_Samples_withCounts_Missing_BAMs_08.17.21.csv", row.names=FALSE)
+```
+
+
+```{r}
+bams_with_rbd <- BAM.manifest %>% 
+   left_join(., select(rbd_manifest, Sample, Library,Lib_Prep, Has_Counts_Fusions_data), 
+            by=c("Sample","Library","Lib_Prep"))
+
+missing_counts <- bams_with_rbd %>% 
+  filter(is.na(Has_Counts_Fusions_data)) %>% 
+  filter(Lib_Prep=="RBD", 
+         !grepl("PATGIG|PATISD", Sample))
+
+
+table(missing_counts$Lib_Prep) #so now I need to find those library IDs!
+
+
+forBCCA.counts <- sow1832 %>% 
+  filter(grepl("CB34pos|D7-EC-GFP1|D7-EC-mock2|PAVAVV|PAWCAW", Sample.ID)) %>% 
+  filter(!grepl("PAVAVV-EOI1-14A|TARGET-20-PAWCAW-EOI1-14A-01R", EXTERNAL_IDENTIFIER)) %>% 
+  mutate_at(vars(EXTERNAL_IDENTIFIER), ~gsub("TARGET-20-PAWCAW-14A-01R","TARGET-20-PAWCAW-EOI2-14A-01R", .))
+
+
+# write.csv(forBCCA.counts, "TARGET_AML_Samples_Missing_Counts_and_Fusions_08.17.21.csv", row.names = FALSE)
+```
+
+
+
+
+Track down samples for which we have BAMs but DO NOT have counts/fusions from BCCA:
+* "TARGET.20.CB34pos.Dayminus1.00.01R" 
+* "TARGET.20.D7.EC.mock2.00.01R"       
+* "TARGET.20.D7.EC.GFP1.00.01R" 
+* "TARGET.20.PAVAVV.EOI2.14A.01R" 
+* "TARGET.20.PAWCAW.EOI2.14A.01R"
+
+
+## Fastqs 
+
+```{r}
+Fastq.manifest <-  read.csv("Fastq_manifests/TARGET_AML_RNAseq_Fastq_File_Manifest_08.11.21.csv")
+
+dim(Fastq.manifest)
+# table(Fastq.manifest$Lib_Prep) #Fix This
+```
+
+
+# Define files Needing MD5sums
+
+```{r}
+creds <- aws.signature::use_credentials(profile = "default")
+Sys.setenv("AWS_ACCESS_KEY_ID" = creds$default$AWS_ACCESS_KEY_ID,
+           "AWS_SECRET_ACCESS_KEY" = creds$default$AWS_SECRET_ACCESS_KEY,
+           "AWS_DEFAULT_REGION"="us-west-2")
+
+
+blist <- bucketlist()
+blist
+
+BUCKET="fh-pi-meshinchi-s-eco-public"
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/BAM"
+
+bams <- get_bucket_df(bucket = BUCKET, 
+                      prefix = PREFIX,
+                      max = Inf)
+
+# head(bams)
+# dim(bams) # 9314    8
+
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/Fastq"
+fastqs <- get_bucket_df(bucket = BUCKET, 
+                        prefix = PREFIX,
+                        max = Inf)
+
+# head(fastqs) #15051     8
+dim(fastqs)#15051     8
+```
+
+To Do for BAMs:
+1) make all MD5 sum file names standardized . Make all M5sum be ${filename}.md5
+2) Remove the CBFGLIS BAM files that are duplciated (see RBS vs no RBS in the filename)
+3) 
+
+```{r}
+bams.df <- bams %>% 
+  mutate(filename=str_split_fixed(Key, pattern="/", n=4)[,4],
+         file_prefix=gsub(".bam|.srt.bam|(.srt)?_md5sum.txt|.srt.md5", "", filename)) %>% 
+  filter(!grepl(".bai", filename)) %>% 
+  select(filename,file_prefix, everything())
+
+
+
+bams.df
+# head(bams.df, n=20)
+# dim(bams.df) #6576   10
+```
+
+
+```{r}
+fastqs.df <- fastqs %>% 
+  filter(!grepl("TARGET_AML/RNAseq_Illumina_Data/Fastq/$", Key)) %>% 
+  mutate(filename=str_split_fixed(Key, pattern = "/", n=4)[,4], 
+         file_prefix=gsub(".fastq.gz|.fq.gz|.fastq.gz|.md5$|_md5sum.txt", "", filename)) %>% 
+    select(filename,file_prefix, everything()) %>% 
+  
+  group_by(file_prefix) %>% 
+  mutate(Paired_MD5=case_when(
+    n() == 2 & any(grepl(".md5", filename)) ~ TRUE
+  )) %>% 
+  ungroup()
+
+
+head(fastqs.df)
+tail(fastqs.df)
+# table(fastqs.df$Paired_MD5)
+```
+```{r}
+unpaired <- fastqs.df %>% 
+  filter(is.na(Paired_MD5)) %>% 
+  mutate(is.md5=ifelse(grepl("md5", filename), "Yes", "No")) %>% 
+  arrange(file_prefix)
+
+
+table(unpaired$is.md5)
+# unpaired #these are all the MD5 sums for temp JMML fastq files
+# fastqs.df %>% 
+#   filter(grepl("UPN0906", filename))
+
+# write.csv(unpaired,"Fastq_manifests/TARGET_AML_AWS_fastqs_delete_8.17.21.csv", row.names = FALSE)
+```
+
+```{bash eval=FALSE}
+BUCKET="fh-pi-meshinchi-s-eco-public"
+PREFIX="TARGET_AML/RNAseq_Illumina_Data/Fastq"
+filenames=$(cat TARGET_AML_AWS_fastqs_delete_8.17.21.csv | cut -f 1 -d  "," | grep -v "filename" | tr -d "\"") 
+
+for file in $(echo "$filenames"); 
+do  
+  aws s3 rm  s3://$BUCKET/$PREFIX/ --recursive --exclude "*" --include "${file}*" ;
+done 
+```
+
+
+#Session Information
+
+```{r}
+session_info()
+```
+
